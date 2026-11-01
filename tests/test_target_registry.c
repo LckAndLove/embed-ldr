@@ -250,6 +250,12 @@ int main(void)
     fw_async_desc.driver.fw_async_ops = &bad_fw_async_ops;
     assert(ecat_target_registry_add(&reg, &fw_async_desc) == -5);
 
+    /* 固件目标仅配置 async_ops 而未配置 fw_async_ops 时，不能误判为合法异步写入并放行 */
+    fw_async_desc.driver.fw_async_ops = NULL;
+    fw_async_desc.driver.async_ops = &good_ops;
+    assert(ecat_target_registry_add(&reg, &fw_async_desc) == -5);
+    fw_async_desc.driver.async_ops = NULL;
+
     static const ecat_foe_target_async_ops_t good_fw_async_ops = {
         .start = mock_fw_async_start,
         .poll = mock_fw_async_poll,

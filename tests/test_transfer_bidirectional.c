@@ -2486,7 +2486,7 @@ int main(void)
     fw_async_exp_desc.target_id = 13U;
     strncpy(fw_async_exp_desc.name, "fw_async_exp", sizeof(fw_async_exp_desc.name));
     fw_async_exp_desc.type = ECAT_TARGET_TYPE_FIRMWARE;
-    fw_async_exp_desc.permissions = ECAT_PERM_RW;
+    fw_async_exp_desc.permissions = ECAT_PERM_READ;
     fw_async_exp_desc.max_size = 512U;
     fw_async_exp_desc.enabled = true;
     fw_async_exp_desc.asynchronous = true;
