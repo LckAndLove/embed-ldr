@@ -421,8 +421,10 @@ int ecat_foe_soes_pre_process_hook(ecat_foe_soes_adapter_t *adapter,
         adapter->pending_data_response = true;
         adapter->pending_data_packet = (uint32_t)mbx_buf[8] | ((uint32_t)mbx_buf[9] << 8) |
                                        ((uint32_t)mbx_buf[10] << 16) | ((uint32_t)mbx_buf[11] << 24);
-        /* 显式将回调路由绑定至当前正在处理 DATA 帧的适配器实例 */
-        s_active_adapter = adapter;
+        /* 仅当当前适配器持有有效传输会话时才绑定回调路由，防止非活跃实例劫持活跃路由 */
+        if (ecat_foe_transport_owns(&adapter->transport)) {
+            s_active_adapter = adapter;
+        }
     }
     if (opcode == ECAT_FOE_OP_ERR) {
         adapter->pending_other_foe = false;
@@ -521,7 +523,7 @@ int ecat_foe_soes_post_process_hook(ecat_foe_soes_adapter_t *adapter,
                                     const uint8_t *mbx_out_buf,
                                     size_t mbx_out_len)
 {
-    if (adapter == NULL || foe_cfg == NULL) {
+    if (adapter == NULL || adapter->core == NULL || foe_cfg == NULL) {
         return -1;
     }
 

@@ -538,6 +538,12 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
 
             if (core->residual_len == wunit) {
                 /* 满一个 write_unit，检查按需擦除并写入 */
+                if (wunit > UINT32_MAX - core->written_offset) {
+                    core_abort_driver(core);
+                    core->state = ECAT_FOE_STATE_ERROR;
+                    core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+                    return -1;
+                }
                 uint32_t write_end = core->written_offset + wunit;
                 if (write_end > core->erased_watermark) {
                     uint32_t erased_end = 0;
@@ -561,7 +567,14 @@ static int core_process_payload_bytes(ecat_foe_core_t *core, const uint8_t *payl
         } else {
             if (remaining >= wunit) {
                 size_t chunks = remaining / wunit;
-                uint32_t bytes_to_write = (uint32_t)(chunks * wunit);
+                size_t bytes_to_write_sz = chunks * wunit;
+                if (bytes_to_write_sz > (size_t)(UINT32_MAX - core->written_offset)) {
+                    core_abort_driver(core);
+                    core->state = ECAT_FOE_STATE_ERROR;
+                    core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+                    return -1;
+                }
+                uint32_t bytes_to_write = (uint32_t)bytes_to_write_sz;
                 uint32_t write_end = core->written_offset + bytes_to_write;
 
                 if (write_end > core->erased_watermark) {
@@ -624,7 +637,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
     /* 块粒度多收熔断检测 (头部装配完成已知期望总长后生效) */
     if (core->header_complete) {
         uint64_t expected_total = (uint64_t)core->hdr.header_length + (uint64_t)core->hdr.payload_length;
-        if (core->total_rx_bytes + (uint64_t)len > expected_total) {
+        if (core->total_rx_bytes > expected_total || (uint64_t)len > expected_total - core->total_rx_bytes) {
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
             core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
@@ -790,7 +803,8 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
 
         /* 关键防御：检查头部与多收同块时在 invalidate 前拒绝，保证旧有效标记不被破坏 */
         uint64_t expected_total = (uint64_t)core->hdr.header_length + (uint64_t)core->hdr.payload_length;
-        if ((uint64_t)core->header_total_len + (uint64_t)p_len > expected_total) {
+        if ((uint64_t)core->header_total_len > expected_total ||
+            (uint64_t)p_len > expected_total - (uint64_t)core->header_total_len) {
             core_abort_driver(core); /* 头部已开始验签，但目标驱动尚未初始化。 */
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
             core->state = ECAT_FOE_STATE_ERROR;
@@ -843,7 +857,7 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
     if (p_len > 0) {
         /* 多收即时熔断检查 */
         uint64_t expected_total = (uint64_t)core->hdr.header_length + (uint64_t)core->hdr.payload_length;
-        if (core->total_rx_bytes + (uint64_t)p_len > expected_total) {
+        if (core->total_rx_bytes > expected_total || (uint64_t)p_len > expected_total - core->total_rx_bytes) {
             core->last_error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
             core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
@@ -861,6 +875,12 @@ int ecat_foe_core_on_data(ecat_foe_core_t *core, const uint8_t *data, size_t len
 int ecat_foe_core_on_end(ecat_foe_core_t *core)
 {
     if (core == NULL) {
+        return -1;
+    }
+    if (core->state == ECAT_FOE_STATE_WRQ_ACKED) {
+        core_abort_driver(core);
+        core->state = ECAT_FOE_STATE_ERROR;
+        core->last_error = ECAT_FOE_CORE_ERR_UNDER_RECEIVE;
         return -1;
     }
     if (core->state != ECAT_FOE_STATE_DATA) {
@@ -897,14 +917,15 @@ int ecat_foe_core_on_end(ecat_foe_core_t *core)
         }
         memset(core->residual_buf + core->residual_len, 0xFF, pad);
 
-        uint32_t write_end = core->written_offset + wunit;
         const ecat_target_desc_t *tdesc = ecat_foe_core_find_fw_target(core, core->hdr.target_id, NULL);
-        if (tdesc == NULL || write_end > tdesc->max_size) {
+        if (tdesc == NULL || wunit > UINT32_MAX - core->written_offset ||
+            core->written_offset + wunit > tdesc->max_size) {
             core_abort_driver(core);
             core->state = ECAT_FOE_STATE_ERROR;
             core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
             return -1;
         }
+        uint32_t write_end = core->written_offset + wunit;
 
         if (write_end > core->erased_watermark) {
             uint32_t erased_end = 0;

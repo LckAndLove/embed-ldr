@@ -117,8 +117,15 @@ def safe_output_for_write(path: str, overwrite: bool = False, protected_paths=()
             yield stream
         if original is None:
             # No-clobber publication if another file appeared during the write.
-            os.link(temp_path, path)
-            os.unlink(temp_path)
+            try:
+                os.link(temp_path, path)
+                os.unlink(temp_path)
+            except OSError as e:
+                if e.errno not in (errno.ENOTSUP, errno.EPERM, errno.EACCES, getattr(errno, 'EOPNOTSUPP', -1)):
+                    raise
+                if os.path.lexists(path):
+                    raise FileExistsError(f'安全拒绝：写入期间输出路径已存在: {path}') from e
+                os.replace(temp_path, path)
         else:
             current = os.lstat(path)
             if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1 or not os.path.samestat(original, current):
@@ -170,9 +177,15 @@ def parse_version_str(v_str: str) -> int:
     """
     s = v_str.strip()
     if s.lower().startswith('0x'):
-        return int(s, 16)
-    if s.isdigit():
-        return int(s, 10)
+        val = int(s, 16)
+        if not (0 <= val <= 0xFFFFFFFF):
+            raise ValueError(f'版本号超出 32 位范围: {v_str}')
+        return val
+    if s.isascii() and s.isdigit():
+        val = int(s, 10)
+        if not (0 <= val <= 0xFFFFFFFF):
+            raise ValueError(f'版本号超出 32 位范围: {v_str}')
+        return val
     if s.startswith(('v', 'V')):
         s = s[1:]
     parts = s.split('.')
@@ -283,8 +296,14 @@ def pack_efw(
     """
     打包 .efw 文件
     """
+    if not (0 <= project_id <= 0xFFFFFFFF) or not (0 <= hardware_id <= 0xFFFFFFFF):
+        raise ValueError('项目 ID 和硬件 ID 必须在 0..0xFFFFFFFF 范围内')
+    if not (0 <= hw_ver_min <= 0xFFFF) or not (0 <= hw_ver_max <= 0xFFFF):
+        raise ValueError('硬件版本必须在 0..65535 范围内')
     if hw_ver_min > hw_ver_max:
         raise ValueError('最低硬件版本不能大于最高硬件版本')
+    if not (0 <= fw_version <= 0xFFFFFFFF) or not (0 <= min_allow_version <= 0xFFFFFFFF):
+        raise ValueError('固件版本和最低允许版本必须在 0..0xFFFFFFFF 范围内')
     if min_allow_version > fw_version:
         raise ValueError('最低允许版本不能大于固件版本')
     if not isinstance(target_id, int) or isinstance(target_id, bool) or not (1 <= target_id <= 0xFFFF):
@@ -342,7 +361,10 @@ def pack_efw(
             ext = struct.pack('<4sHHHH8s', b'SIG2', 1, 1, 64, 8, _key_id(public_key_bytes))
             signed_prefix = header_prefix + ext
             domain = b'ECAT-EFW-SIG-V2\0'
-            _, signature = _sign_ed25519ph(bytes(seed), (domain, signed_prefix, payload_bytes))
+            state = sodium.crypto_sign_ed25519ph_state()
+            for part in (domain, signed_prefix, payload_bytes):
+                sodium.crypto_sign_ed25519ph_update(state, part)
+            signature = sodium.crypto_sign_ed25519ph_final_create(state, secret_key)
             signed_header = signed_prefix + signature
             header_bytes = signed_header + struct.pack('<I', crc32_ieee(signed_header))
         finally:

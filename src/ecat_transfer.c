@@ -1256,6 +1256,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                 t->erased_watermark = actual_erased;
 
                 /* 擦除已轮询完成，状态机无缝启动第二阶段 WRITE */
+                memset(&t->async_data_op, 0, sizeof(t->async_data_op));
                 t->async_data_op.kind = ECAT_ASYNC_DATA_OP_WRITE;
                 t->async_data_op.offset = t->current_offset;
                 t->async_data_op.length = (uint32_t)t->pending_length;

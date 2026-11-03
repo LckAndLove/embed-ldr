@@ -178,16 +178,18 @@ static ecat_upgrade_async_result_t fail_session(ecat_foe_core_async_t *s,
     } else if (s->runner.pending) {
         ecat_foe_target_async_abort(&s->runner);
     }
-    if (c != NULL && s->target_session_started && c->active_drv == NULL) {
-        c->driver_abort_called = true;
+    if (c != NULL) {
+        if (s->target_session_started && c->active_drv == NULL) {
+            c->driver_abort_called = true;
+        }
+        if (c->signature_active && c->cfg.signature_verifier.abort != NULL) {
+            c->cfg.signature_verifier.abort(c->cfg.signature_verifier.user_ctx);
+            c->signature_active = false;
+        }
+        c->session_active = false; /* async driver session was aborted above */
+        c->state = ECAT_FOE_STATE_ERROR;
+        c->last_error = error;
     }
-    if (c->signature_active && c->cfg.signature_verifier.abort != NULL) {
-        c->cfg.signature_verifier.abort(c->cfg.signature_verifier.user_ctx);
-        c->signature_active = false;
-    }
-    c->session_active = false; /* async driver session was aborted above */
-    c->state = ECAT_FOE_STATE_ERROR;
-    c->last_error = error;
     s->phase = ECAT_FOE_CORE_ASYNC_PHASE_NONE;
     s->state = ECAT_FOE_CORE_ASYNC_FAILED;
     return ECAT_UPGRADE_ASYNC_FAILED;
