@@ -194,8 +194,7 @@ ecat_foe_efw_err_t ecat_foe_efw_parse_stage2(
         header_length != expected_length || (header_length % 4U) != 0U) {
         return ECAT_FOE_EFW_ERR_HEADER_LEN_MIN;
     }
-    if (len < (size_t)expected_length) return ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL;
-    if (len < (size_t)header_length) {
+    if (len < (size_t)expected_length) {
         return ECAT_FOE_EFW_ERR_BUFFER_TOO_SMALL;
     }
 

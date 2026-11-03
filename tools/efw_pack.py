@@ -266,16 +266,6 @@ def _key_id(public_key: bytes) -> bytes:
     return __import__('hashlib').sha256(b'ECAT-EFW-KEY-ID-v1\0' + public_key).digest()[:8]
 
 
-def _sign_ed25519ph(seed: bytes, message_parts) -> tuple:
-    sodium = _sodium()
-    public_key, secret_key = sodium.crypto_sign_seed_keypair(seed)
-    state = sodium.crypto_sign_ed25519ph_state()
-    for part in message_parts:
-        sodium.crypto_sign_ed25519ph_update(state, part)
-    signature = sodium.crypto_sign_ed25519ph_final_create(state, secret_key)
-    return public_key, signature
-
-
 def pack_efw(
     project_id: int,
     hardware_id: int,

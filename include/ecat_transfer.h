@@ -92,7 +92,6 @@ typedef struct {
 
     /* 当前激活传输状态 */
     const ecat_target_desc_t *target;   /* 当前目标描述符 */
-    uint16_t current_transport_id;      /* 当前持有者通道 ID */
     ecat_transfer_dir_t direction;      /* 当前传输方向 */
     uint32_t current_offset;            /* 当前已处理偏移量 */
     uint32_t total_size;                /* 总大小 (导出时为数据量，导入时为限额) */

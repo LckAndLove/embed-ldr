@@ -42,8 +42,6 @@ typedef struct {
     ecat_foe_core_async_phase_t phase;
     size_t packet_length;
     size_t packet_cursor;
-    size_t packet_payload_start;
-    bool packet_following;
     bool packet_complete;
     bool packet_accounted;
     bool end_requested;

@@ -369,8 +369,7 @@ int ecat_foe_core_init(ecat_foe_core_t *core, const ecat_foe_core_cfg_t *cfg)
         return -1;
     }
     if (local_cfg.signature_verify_enable &&
-        (local_cfg.max_header_size < ECAT_FOE_EFW_HEADER_MIN_LEN ||
-         local_cfg.signature_verifier.begin == NULL ||
+        (local_cfg.signature_verifier.begin == NULL ||
          local_cfg.signature_verifier.update == NULL ||
          local_cfg.signature_verifier.finish == NULL ||
          local_cfg.signature_verifier.abort == NULL)) {

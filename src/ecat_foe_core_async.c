@@ -113,8 +113,6 @@ static ecat_upgrade_async_result_t async_start(void *ctx, const uint8_t *data,
     }
     s->packet_length = length;
     s->packet_cursor = 0U;
-    s->packet_payload_start = 0U;
-    s->packet_following = following;
     s->packet_complete = false;
     s->packet_accounted = false;
     s->end_requested = !following;
@@ -352,7 +350,6 @@ static int validate_header(ecat_foe_core_async_t *s)
     c->erased_watermark = 0U;
     c->residual_len = 0U;
     ecat_foe_crc32_init(&c->stream_crc);
-    s->packet_payload_start = c->header_total_len;
     return 0;
 }
 
@@ -625,19 +622,6 @@ static ecat_upgrade_async_result_t pump(ecat_foe_core_async_t *s)
         if (s->runner.pending) return ECAT_UPGRADE_ASYNC_PENDING;
     }
 
-    if (!c->driver_invalidated) {
-        /* This also covers synchronous-complete init -> invalidate chains. */
-        if (s->phase != ECAT_FOE_CORE_ASYNC_PHASE_NONE || s->runner.pending) {
-            return ECAT_UPGRADE_ASYNC_PENDING;
-        }
-        int r = begin_operation(s, ECAT_FOE_TARGET_OP_INVALIDATE, 0U, 0U,
-                                NULL, 0U, NULL, NULL);
-        if (r < 0) return fail_session(s, ECAT_FOE_CORE_ERR_DRV_INVALIDATE);
-        if (r > 0) return ECAT_UPGRADE_ASYNC_PENDING;
-        c->driver_invalidated = true;
-        c->session_active = true;
-        ecat_foe_core_mark_slot_incomplete(c, c->active_target_slot);
-    }
 
     int r = pump_payload(s);
     if (r < 0) return fail_session(s, c->last_error);
