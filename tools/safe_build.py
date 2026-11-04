@@ -6,7 +6,6 @@ tools/safe_build.py: 本地构建与安全清理管理工具
 """
 
 import os
-import sys
 import json
 import time
 import hashlib

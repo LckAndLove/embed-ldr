@@ -2,6 +2,7 @@
 #include "../ecat_foe_core_internal.h"
 /* FoE bridge to the unified transfer manager. */
 #include "ecat_foe_transport.h"
+#include "ecat_transport_endpoint.h"
 #include <string.h>
 
 int ecat_foe_transport_init_transfer(ecat_foe_transport_t *t, ecat_transfer_t *transfer)
@@ -116,7 +117,7 @@ int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t l
 
     ecat_transfer_request_t req;
     memset(&req, 0, sizeof(req));
-    req.transport_id = 1U; /* FoE 通道 ID */
+    req.transport_id = ECAT_TRANSPORT_ID_FOE; /* FoE 通道 ID */
     req.target_id = target_id;
     req.direction = ECAT_TRANSFER_DIR_IMPORT;
     req.expected_size = 0U;
