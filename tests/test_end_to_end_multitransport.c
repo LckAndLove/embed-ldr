@@ -174,6 +174,10 @@ static ecat_async_op_result_t e2e_async_start(void *ctx, ecat_async_data_op_t *o
                 op->length <= sizeof(s_e2e_hw_state.received_payload)) {
                 memcpy(s_e2e_hw_state.received_payload, op->buffer, op->length);
                 s_e2e_hw_state.received_len = op->length;
+            } else if (op->kind == ECAT_ASYNC_DATA_OP_READ && op->buffer != NULL) {
+                for (uint32_t i = 0; i < op->length; i++) {
+                    op->buffer[i] = (uint8_t)((op->offset + i) ^ 0x5AU);
+                }
             }
             s_e2e_hw_state.hw_reading_buf = NULL;
         } else {
@@ -201,6 +205,10 @@ static ecat_async_op_result_t e2e_async_poll(void *ctx, ecat_async_data_op_t *op
                 s_e2e_hw_state.hw_reading_len <= sizeof(s_e2e_hw_state.received_payload)) {
                 memcpy(s_e2e_hw_state.received_payload, s_e2e_hw_state.hw_reading_buf, s_e2e_hw_state.hw_reading_len);
                 s_e2e_hw_state.received_len = s_e2e_hw_state.hw_reading_len;
+            } else if (op->kind == ECAT_ASYNC_DATA_OP_READ && op->buffer != NULL) {
+                for (uint32_t i = 0; i < op->length; i++) {
+                    op->buffer[i] = (uint8_t)((op->offset + i) ^ 0x5AU);
+                }
             }
             s_e2e_hw_state.hw_reading_buf = NULL;
         } else {
@@ -794,7 +802,7 @@ int main(void)
 
     /* Invalid direction is rejected without consuming the stream. */
     ecat_transfer_request_t invalid_file_req = upg_mcu_req;
-    invalid_file_req.direction = ECAT_TRANSFER_DIR_EXPORT;
+    invalid_file_req.direction = (ecat_transfer_dir_t)99;
     assert(ecat_transfer_file_begin(&file_tr, tmp_fp, &invalid_file_req) == ECAT_TRANSFER_INVALID);
     assert(ftell(tmp_fp) == 0);
 
@@ -958,6 +966,99 @@ int main(void)
     assert(f_step_res == ECAT_TRANSFER_COMPLETE);
     assert(ecat_transfer_is_active(&mgr) == false);
     fclose(tmp_fp);
+
+    /* ---------------------------------------------------------------------- */
+    /* D3.5.4: 文件流适配器双向 EXPORT 导出 (同步 + 异步 + 取消 + ACL 拦截)   */
+    /* ---------------------------------------------------------------------- */
+    printf("--- 测试 D3.5.4: 文件流适配器同步/异步 EXPORT 导出与错误处理验证 ---\n");
+    {
+        /* 1. 同步导出黑匣子日志 (通道 3 有 target 4 读权限，512B 经 64B 缓冲分 8 块导出) */
+        FILE *exp_fp = tmpfile();
+        assert(exp_fp != NULL);
+        ecat_transfer_request_t exp_log_req = {
+            .transport_id = 3U,
+            .target_id = 4U,
+            .direction = ECAT_TRANSFER_DIR_EXPORT
+        };
+        assert(ecat_transfer_file_begin(&file_tr, exp_fp, &exp_log_req) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_is_active(&mgr) == true);
+        /* 互斥验证: 导出期间其它端点被 BUSY 拦截 */
+        assert(ecat_transport_endpoint_begin_import(&ep_foe, 1U, 1024, 0x01000000U) == ECAT_TRANSFER_BUSY);
+        f_step_res = ECAT_TRANSFER_PENDING;
+        for (unsigned s = 0; f_step_res == ECAT_TRANSFER_PENDING && s < 32U; s++) {
+            f_step_res = ecat_transfer_file_step(&file_tr);
+        }
+        assert(f_step_res == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_is_active(&mgr) == false);
+        assert(ecat_transfer_get_crc32(&mgr) == expected_log_crc);
+        rewind(exp_fp);
+        uint8_t exported_log[sizeof(s_flash_log)];
+        assert(fread(exported_log, 1U, sizeof(exported_log), exp_fp) == sizeof(exported_log));
+        assert(memcmp(exported_log, s_flash_log, sizeof(s_flash_log)) == 0);
+        fclose(exp_fp);
+
+        /* 2. ACL 越权导出拦截: 通道 2 未获权导出 target 4 */
+        exp_fp = tmpfile();
+        assert(exp_fp != NULL);
+        ecat_transfer_request_t denied_exp_req = exp_log_req;
+        denied_exp_req.transport_id = 2U;
+        assert(ecat_transfer_file_begin(&file_tr, exp_fp, &denied_exp_req) == ECAT_TRANSFER_DENIED);
+        assert(ecat_transfer_is_active(&mgr) == false);
+        fclose(exp_fp);
+
+        /* 3. 异步导出 (目标 5): READ_OPEN PENDING -> READ PENDING -> READ_CLOSE PENDING */
+        assert(ecat_target_registry_add_acl(&reg, 2U, 5U, ECAT_PERM_READ) == 0);
+        exp_fp = tmpfile();
+        assert(exp_fp != NULL);
+        ecat_transfer_request_t async_exp_req = {
+            .transport_id = 2U,
+            .target_id = 5U,
+            .direction = ECAT_TRANSFER_DIR_EXPORT,
+            .expected_size = 128U
+        };
+        s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+        assert(ecat_transfer_file_begin(&file_tr, exp_fp, &async_exp_req) == ECAT_TRANSFER_PENDING);
+        assert(file_tr.active == true && file_tr.pending == true);
+        /* READ_OPEN 仍挂起 */
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
+        /* 完成 READ_OPEN */
+        s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
+        assert(file_tr.pending == false);
+        /* 第 1 块 64B 挂起后完成 */
+        s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
+        assert(file_tr.pending == true && file_tr.read_in_flight == true);
+        s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
+        assert(file_tr.pending == false && file_tr.read_in_flight == false);
+        /* 第 2 块 64B 完成 + READ_CLOSE 挂起后完成 */
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
+        assert(file_tr.export_eof == true);
+        s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_PENDING);
+        assert(file_tr.ending == true && file_tr.pending == true);
+        s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+        assert(ecat_transfer_file_step(&file_tr) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_is_active(&mgr) == false);
+        rewind(exp_fp);
+        uint8_t exported_async[128];
+        assert(fread(exported_async, 1U, sizeof(exported_async), exp_fp) == sizeof(exported_async));
+        for (size_t i = 0; i < sizeof(exported_async); i++) {
+            assert(exported_async[i] == (uint8_t)(i ^ 0x5AU));
+        }
+        fclose(exp_fp);
+
+        /* 4. 异步导出中途 cancel 释放租约 */
+        exp_fp = tmpfile();
+        assert(exp_fp != NULL);
+        s_e2e_async_res = ECAT_ASYNC_OP_PENDING;
+        assert(ecat_transfer_file_begin(&file_tr, exp_fp, &async_exp_req) == ECAT_TRANSFER_PENDING);
+        assert(ecat_transfer_file_cancel(&file_tr) == ECAT_TRANSFER_COMPLETE);
+        assert(ecat_transfer_is_active(&mgr) == false);
+        s_e2e_async_res = ECAT_ASYNC_OP_COMPLETE;
+        fclose(exp_fp);
+    }
 
     /* ---------------------------------------------------------------------- */
     /* D3.6: FoE 适配器直连统一核心完整流程、abort 释放与会话互斥消除验证      */

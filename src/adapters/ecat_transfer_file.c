@@ -18,7 +18,8 @@ ecat_transfer_result_t ecat_transfer_file_begin(ecat_transfer_file_t *f,
     FILE *stream, const ecat_transfer_request_t *request)
 {
     if (f == NULL || f->transfer == NULL || stream == NULL || request == NULL ||
-        request->direction != ECAT_TRANSFER_DIR_IMPORT)
+        (request->direction != ECAT_TRANSFER_DIR_IMPORT &&
+         request->direction != ECAT_TRANSFER_DIR_EXPORT))
         return ECAT_TRANSFER_INVALID;
     if (f->active) return ECAT_TRANSFER_BUSY;
 
@@ -26,9 +27,13 @@ ecat_transfer_result_t ecat_transfer_file_begin(ecat_transfer_file_t *f,
     if (result != ECAT_TRANSFER_COMPLETE && result != ECAT_TRANSFER_PENDING)
         return result;
     f->stream = stream;
+    f->direction = request->direction;
+    f->pending_read_len = 0U;
     f->active = true;
     f->pending = result == ECAT_TRANSFER_PENDING;
     f->ending = false;
+    f->export_eof = false;
+    f->read_in_flight = false;
     f->io_error = false;
     f->result = ECAT_TRANSFER_PENDING;
     return result;
@@ -41,6 +46,10 @@ ecat_transfer_result_t ecat_transfer_file_cancel(ecat_transfer_file_t *f)
     ecat_transfer_result_t result = ecat_transfer_cancel(f->transfer, f, f->token);
     f->active = false;
     f->pending = false;
+    f->ending = false;
+    f->export_eof = false;
+    f->read_in_flight = false;
+    f->pending_read_len = 0U;
     f->result = ECAT_TRANSFER_FAILED;
     return result;
 }
@@ -59,10 +68,56 @@ static ecat_transfer_result_t advance(ecat_transfer_file_t *f, ecat_transfer_res
     return f->result;
 }
 
+static ecat_transfer_result_t flush_export_chunk(ecat_transfer_file_t *f, ecat_transfer_result_t result)
+{
+    if (result == ECAT_TRANSFER_PENDING) {
+        f->pending = true;
+        return ECAT_TRANSFER_PENDING;
+    }
+    f->pending = false;
+    f->read_in_flight = false;
+    if (result != ECAT_TRANSFER_COMPLETE && result != ECAT_TRANSFER_CONTINUE) {
+        (void)ecat_transfer_file_cancel(f);
+        return ECAT_TRANSFER_FAILED;
+    }
+    if (f->pending_read_len > 0U) {
+        if (fwrite(f->buffer, 1U, f->pending_read_len, f->stream) != f->pending_read_len ||
+            ferror(f->stream)) {
+            f->io_error = true;
+            (void)ecat_transfer_file_cancel(f);
+            return ECAT_TRANSFER_FAILED;
+        }
+        f->pending_read_len = 0U;
+    }
+    if (result == ECAT_TRANSFER_COMPLETE) {
+        f->export_eof = true;
+    }
+    return f->result;
+}
+
 ecat_transfer_result_t ecat_transfer_file_step(ecat_transfer_file_t *f)
 {
     if (f == NULL || f->transfer == NULL) return ECAT_TRANSFER_INVALID;
     if (!f->active) return f->result;
+
+    if (f->direction == ECAT_TRANSFER_DIR_EXPORT) {
+        if (f->pending) {
+            ecat_transfer_result_t res = ecat_transfer_poll(f->transfer, f, f->token);
+            if (f->read_in_flight) {
+                return flush_export_chunk(f, res);
+            }
+            return advance(f, res);
+        }
+        if (f->export_eof) {
+            f->ending = true;
+            return advance(f, ecat_transfer_finish(f->transfer, f, f->token));
+        }
+        f->pending_read_len = 0U;
+        f->read_in_flight = true;
+        return flush_export_chunk(f, ecat_transfer_read(
+            f->transfer, f, f->token, f->buffer, f->capacity, &f->pending_read_len));
+    }
+
     if (f->pending)
         return advance(f, ecat_transfer_poll(f->transfer, f, f->token));
 
