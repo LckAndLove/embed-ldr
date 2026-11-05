@@ -80,6 +80,8 @@ void ecat_foe_transport_abort(void *ctx)
     if (ecat_foe_transport_owns(t)) {
         (void)ecat_transfer_cancel(t->transfer, t, t->token);
     }
+    t->direction = (ecat_transfer_dir_t)0;
+    t->export_zero_eof = false;
     t->pending = false;
     t->begin_pending = false;
     t->finish_after_write = false;
@@ -125,17 +127,240 @@ int ecat_foe_transport_begin(ecat_foe_transport_t *t, const char *name, size_t l
 
     ecat_transfer_result_t tres = ecat_transfer_begin(t->transfer, t, &req, &t->token);
     if (tres == ECAT_TRANSFER_PENDING) {
+        t->direction = ECAT_TRANSFER_DIR_IMPORT;
+        t->export_zero_eof = false;
         t->pending = true;
         t->begin_pending = true;
         return 0;
     } else if (tres == ECAT_TRANSFER_COMPLETE) {
+        t->direction = ECAT_TRANSFER_DIR_IMPORT;
+        t->export_zero_eof = false;
         t->pending = false;
         t->begin_pending = false;
         return 0;
     } else {
         return ECAT_FOE_ERRCODE_NOTDEFINED;
     }
+}
 
+static bool parse_canonical_target_token(const char *tok, size_t tok_len, uint16_t *out_tid)
+{
+    if (tok == NULL || out_tid == NULL || tok_len == 0U) {
+        return false;
+    }
+    if (tok_len == 3U && memcmp(tok, "MCU", 3U) == 0) {
+        *out_tid = ECAT_FOE_TARGET_MCU;
+        return true;
+    }
+    if (tok_len == 4U && memcmp(tok, "FPGA", 4U) == 0) {
+        *out_tid = ECAT_FOE_TARGET_FPGA;
+        return true;
+    }
+    if (tok_len == 3U && memcmp(tok, "SII", 3U) == 0) {
+        *out_tid = ECAT_FOE_TARGET_SII;
+        return true;
+    }
+    if (tok_len == 6U && memcmp(tok, "EEPROM", 6U) == 0) {
+        *out_tid = ECAT_FOE_TARGET_EEPROM;
+        return true;
+    }
+    if (tok_len == 5U && tok[0] == 'T') {
+        uint32_t parsed_hex = 0U;
+        for (size_t i = 1U; i < 5U; i++) {
+            char c = tok[i];
+            uint32_t nibble = 0U;
+            if (c >= '0' && c <= '9') {
+                nibble = (uint32_t)(c - '0');
+            } else if (c >= 'A' && c <= 'F') {
+                nibble = (uint32_t)(c - 'A') + 10U;
+            } else {
+                return false;
+            }
+            parsed_hex = (parsed_hex << 4) | nibble;
+        }
+        if (parsed_hex >= 5U && parsed_hex <= 0xFFFFU) {
+            *out_tid = (uint16_t)parsed_hex;
+            return true;
+        }
+    }
+    return false;
+}
+
+int ecat_foe_transport_resolve_read_target(const ecat_foe_transport_t *t,
+                                           const char *name,
+                                           size_t length,
+                                           uint16_t *out_target_id)
+{
+    if (t == NULL || t->transfer == NULL || t->transfer->registry == NULL ||
+        name == NULL || out_target_id == NULL) {
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+    if (length == 0U || length > ECAT_FOE_MAX_FILENAME_LEN) {
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+
+    char safe_name[ECAT_FOE_MAX_FILENAME_LEN + 1U];
+    memcpy(safe_name, name, length);
+    safe_name[length] = '\0';
+
+    /* 1. 优先精确匹配注册表 target->name (适用于日志、参数、自定义目标等) */
+    const ecat_target_desc_t *desc =
+        ecat_target_registry_find_by_name(t->transfer->registry, safe_name);
+    if (desc != NULL) {
+        *out_target_id = desc->target_id;
+        return 0;
+    }
+
+    /* 2. 兼容规范前缀 <PROJECT>_<TARGET> (MCU/FPGA/SII/EEPROM/T0005..TFFFF) */
+    const ecat_foe_core_t *core = get_transport_core(t);
+    if (core != NULL && core->is_configured) {
+        const char *proj = ecat_foe_core_get_project_name(core);
+        if (proj != NULL) {
+            size_t proj_len = strlen(proj);
+            if (proj_len > 0U && length > proj_len + 1U &&
+                memcmp(safe_name, proj, proj_len) == 0 &&
+                safe_name[proj_len] == '_') {
+                uint16_t tid = 0U;
+                if (parse_canonical_target_token(safe_name + proj_len + 1U,
+                                                 length - proj_len - 1U,
+                                                 &tid)) {
+                    if (ecat_target_registry_find_by_id(t->transfer->registry, tid) != NULL) {
+                        *out_target_id = tid;
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    return ECAT_FOE_ERRCODE_NOTFOUND;
+}
+
+int ecat_foe_transport_begin_read(ecat_foe_transport_t *t,
+                                  const char *name,
+                                  size_t length,
+                                  uint32_t *out_total_size)
+{
+    if (t == NULL || t->transfer == NULL || t->transfer->registry == NULL || name == NULL) {
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+    ecat_upgrade_session_t *sess = get_transport_session(t);
+    if (sess != NULL && sess->owner != NULL && !ecat_foe_transport_owns(t)) {
+        return ECAT_FOE_ERRCODE_NOTDEFINED;
+    }
+    ecat_foe_transport_abort(t);
+    t->committed = false;
+
+    uint16_t target_id = 0U;
+    int rrc = ecat_foe_transport_resolve_read_target(t, name, length, &target_id);
+    if (rrc != 0) {
+        return rrc;
+    }
+
+    const ecat_target_desc_t *desc =
+        ecat_target_registry_find_by_id(t->transfer->registry, target_id);
+    if (desc == NULL || !desc->enabled) {
+        return ECAT_FOE_ERRCODE_NOTFOUND;
+    }
+    if (desc->asynchronous) {
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+
+    /* 安全红线: 严禁导出处于未闭环升级态 (已 invalidate 但未 finalize) 的固件半成品 */
+    const ecat_foe_core_t *core = get_transport_core(t);
+    if (desc->type == ECAT_TARGET_TYPE_FIRMWARE && core != NULL &&
+        ecat_foe_core_target_upgrade_incomplete(core, target_id)) {
+        return ECAT_FOE_ERRCODE_ACCESS;
+    }
+
+    ecat_transfer_request_t req;
+    memset(&req, 0, sizeof(req));
+    req.transport_id = ECAT_TRANSPORT_ID_FOE;
+    req.target_id = target_id;
+    req.direction = ECAT_TRANSFER_DIR_EXPORT;
+    req.expected_size = 0U;
+    req.fw_version = 0U;
+
+    ecat_transfer_result_t tres = ecat_transfer_begin(t->transfer, t, &req, &t->token);
+    if (tres == ECAT_TRANSFER_COMPLETE) {
+        t->direction = ECAT_TRANSFER_DIR_EXPORT;
+        t->export_zero_eof = false;
+        t->pending = false;
+        t->begin_pending = false;
+        if (out_total_size != NULL) {
+            *out_total_size = ecat_transfer_get_total_export_size(t->transfer);
+        }
+        return 0;
+    }
+    if (tres == ECAT_TRANSFER_PENDING) {
+        /* 同步 FoE RRQ 不支持异步挂起导出，安全中止释放租约 */
+        (void)ecat_transfer_cancel(t->transfer, t, t->token);
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+    if (tres == ECAT_TRANSFER_DENIED) {
+        return ECAT_FOE_ERRCODE_ACCESS;
+    }
+    if (ecat_transfer_get_last_error(t->transfer) == ECAT_TRANSFER_ERR_TARGET_NOT_FOUND) {
+        return ECAT_FOE_ERRCODE_NOTFOUND;
+    }
+    return ECAT_FOE_ERRCODE_NOTDEFINED;
+}
+
+int ecat_foe_transport_read(ecat_foe_transport_t *t,
+                            uint8_t *out_buf,
+                            size_t max_length,
+                            size_t *out_length)
+{
+    if (t == NULL || out_length == NULL || !ecat_foe_transport_owns(t) ||
+        t->direction != ECAT_TRANSFER_DIR_EXPORT) {
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+    *out_length = 0U;
+
+    /* 整包对齐后的 0 字节 EOF 结束帧 */
+    if (t->export_zero_eof) {
+        t->export_zero_eof = false;
+        ecat_transfer_result_t fres = ecat_transfer_finish(t->transfer, t, t->token);
+        if (fres == ECAT_TRANSFER_COMPLETE) {
+            t->direction = (ecat_transfer_dir_t)0;
+            mark_committed(t);
+            return 0;
+        }
+        ecat_foe_transport_abort(t);
+        return ECAT_FOE_ERRCODE_PROGERROR;
+    }
+
+    if (out_buf == NULL || max_length == 0U) {
+        ecat_foe_transport_abort(t);
+        return ECAT_FOE_ERRCODE_ILLEGAL;
+    }
+
+    size_t actual = 0U;
+    ecat_transfer_result_t rres = ecat_transfer_read(
+        t->transfer, t, t->token, out_buf, max_length, &actual);
+    if (rres == ECAT_TRANSFER_CONTINUE) {
+        *out_length = actual;
+        return 0;
+    }
+    if (rres == ECAT_TRANSFER_COMPLETE) {
+        *out_length = actual;
+        if (actual == max_length) {
+            /* 数据总长恰好为单包整数倍：保留会话待下一次拉取发送 0 字节 EOF 包 */
+            t->export_zero_eof = true;
+            return 0;
+        }
+        ecat_transfer_result_t fres = ecat_transfer_finish(t->transfer, t, t->token);
+        if (fres == ECAT_TRANSFER_COMPLETE) {
+            t->direction = (ecat_transfer_dir_t)0;
+            mark_committed(t);
+            return 0;
+        }
+        ecat_foe_transport_abort(t);
+        return ECAT_FOE_ERRCODE_PROGERROR;
+    }
+
+    ecat_foe_transport_abort(t);
+    return ECAT_FOE_ERRCODE_PROGERROR;
 }
 
 ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *data,

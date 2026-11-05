@@ -129,6 +129,42 @@ uint16_t ecat_foe_ssc_on_main_loop(ecat_foe_ssc_adapter_t *adapter,
 uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter);
 
 /**
+ * @brief SSC FOE_Read 回调适配转接函数 (同步只读导出)
+ * 对应 SSC foeappl.c 中的 FOE_Read 入口。校验密码与目标权限后开启导出并拉取首块数据。
+ * @param adapter      适配层上下文
+ * @param pName        请求读取的文件名（支持注册表 target->name 或 <PROJECT>_<TARGET>）
+ * @param nameSize     文件名长度 (字节)
+ * @param password     FoE 访问密码
+ * @param maxBlockSize 本次可写入 pData 的最大字节数
+ * @param pData        输出数据缓冲区
+ * @param outLength    传出实际写入字节数（< maxBlockSize 表示单包即结束）
+ * @return 0 成功；非 0 返回标准 FoE 错误码 (如 0x8001 / 0x8002 / 0x800A / 0x8004)
+ */
+uint16_t ecat_foe_ssc_on_read(ecat_foe_ssc_adapter_t *adapter,
+                              const char *pName,
+                              uint16_t nameSize,
+                              uint32_t password,
+                              uint16_t maxBlockSize,
+                              uint8_t *pData,
+                              uint16_t *outLength);
+
+/**
+ * @brief SSC FOE_ReadData 回调适配转接函数 (同步只读导出后续分块)
+ * 对应 SSC foeappl.c 中的 FOE_ReadData 入口。严格校验 offset 顺序后拉取下一块数据。
+ * @param adapter      适配层上下文
+ * @param offset       请求读取的字节偏移量（必须与当前已导出偏移严格一致）
+ * @param maxBlockSize 本次可写入 pData 的最大字节数
+ * @param pData        输出数据缓冲区
+ * @param outLength    传出实际写入字节数（< maxBlockSize 或 0 表示导出结束并释放会话）
+ * @return 0 成功；非 0 返回标准 FoE 错误码 (如 0x8004 / 0x8005 / 0x800B)
+ */
+uint16_t ecat_foe_ssc_on_read_data(ecat_foe_ssc_adapter_t *adapter,
+                                   uint32_t offset,
+                                   uint16_t maxBlockSize,
+                                   uint8_t *pData,
+                                   uint16_t *outLength);
+
+/**
  * @brief SSC 中止/错误处理适配转接函数
  * 对应 SSC 中的错误发生或主站 Abort 时调用，重置会话并清理驱动。
  * @param adapter   适配层上下文

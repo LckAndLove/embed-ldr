@@ -18,6 +18,7 @@
 #include "ecat_foe_efw.h"
 #include "ecat_target_registry.h"
 #include "ecat_transfer.h"
+#include "ecat_transport_endpoint.h"
 #include "mock_driver.h"
 
 #define TEST_PROJECT_ID      0x10010001U
@@ -65,6 +66,40 @@ static const ecat_foe_target_async_ops_t s_dummy_fw_async_ops = {
     dummy_fw_async_abort,
     dummy_fw_async_abort_session
 };
+
+/* 只读导出测试用数据目标驱动桩 */
+typedef struct {
+    uint8_t data[256];
+    uint32_t data_len;
+    unsigned open_calls;
+    unsigned close_calls;
+} test_ro_export_drv_t;
+
+static int ro_export_open(void *ctx)
+{
+    test_ro_export_drv_t *d = (test_ro_export_drv_t *)ctx;
+    d->open_calls++;
+    return 0;
+}
+static void ro_export_close(void *ctx)
+{
+    test_ro_export_drv_t *d = (test_ro_export_drv_t *)ctx;
+    d->close_calls++;
+}
+static int ro_export_read(uint32_t offset, uint8_t *buf, uint32_t len, void *ctx)
+{
+    test_ro_export_drv_t *d = (test_ro_export_drv_t *)ctx;
+    if (offset > d->data_len || len > d->data_len - offset) {
+        return -1;
+    }
+    memcpy(buf, &d->data[offset], len);
+    return 0;
+}
+static uint32_t ro_export_get_size(void *ctx)
+{
+    test_ro_export_drv_t *d = (test_ro_export_drv_t *)ctx;
+    return d->data_len;
+}
 
 static void setup_core_with_registry(ecat_foe_core_t *core,
                                      const ecat_target_registry_t *registry,
@@ -661,6 +696,152 @@ int main(void)
         printf(" [PASS]\n");
     }
 
-    printf("\n>>> Beckhoff SSC 适配层抽象契约 17 项测试全部通过 (Mock 环境) <<<\n");
+    /* [TEST 18] SSC 同步 RRQ 双向导出: 注册表名 + 规范前缀 + 整包 0 字节 EOF */
+    {
+        printf("[TEST 18] 验证 SSC 同步 RRQ 导出 (目标名/规范前缀/整包 0 字节 EOF)...");
+        mock_driver_init(&s_mock_drv);
+        test_ro_export_drv_t log_drv;
+        memset(&log_drv, 0, sizeof(log_drv));
+        log_drv.data_len = 128U; /* 恰好 2 * 64B，验证整包对齐补 0 字节 EOF 帧 */
+        for (size_t i = 0; i < log_drv.data_len; i++) {
+            log_drv.data[i] = (uint8_t)(i ^ 0x3CU);
+        }
+
+        ecat_target_registry_t registry;
+        ecat_transfer_t transfer;
+        assert(ecat_target_registry_init(&registry) == 0);
+
+        ecat_target_desc_t fw_rw = {
+            .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_RW, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
+            .enabled = true,
+            .driver = { .io = s_mock_drv.driver, .read_open = ro_export_open, .read_close = ro_export_close, .get_data_size = ro_export_get_size },
+            .user_ctx = &s_mock_drv
+        };
+        ecat_target_desc_t log_ro = {
+            .target_id = 10U, .name = "flight_log", .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_READ, .max_size = sizeof(log_drv.data),
+            .enabled = true,
+            .driver = { .io = { .read = ro_export_read }, .read_open = ro_export_open, .read_close = ro_export_close, .get_data_size = ro_export_get_size },
+            .user_ctx = &log_drv
+        };
+        assert(ecat_target_registry_add(&registry, &fw_rw) == 0);
+        assert(ecat_target_registry_add(&registry, &log_ro) == 0);
+        ecat_target_registry_set_enforce_acl(&registry, true);
+        assert(ecat_target_registry_add_acl(&registry, ECAT_TRANSPORT_ID_FOE, 10U, ECAT_PERM_READ) == 0);
+        assert(ecat_target_registry_add_acl(&registry, ECAT_TRANSPORT_ID_FOE, 1U, ECAT_PERM_WRITE) == 0);
+
+        setup_core_with_registry(&core, &registry, &adapter, 64U);
+        assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
+        assert(ecat_foe_ssc_set_expected_password(&adapter, 0xCAFE0001U) == 0);
+
+        uint8_t rx[128];
+        uint16_t out_len = 0U;
+        const char *log_name = "flight_log";
+
+        /* 1. 密码错误拦截 (0x800A)，不触碰驱动 */
+        assert(ecat_foe_ssc_on_read(&adapter, log_name, (uint16_t)strlen(log_name),
+                                    0xDEADBEEFU, 64U, rx, &out_len) == ECAT_FOE_SSC_ERR_NORIGHTS_PW);
+        assert(log_drv.open_calls == 0U && !adapter.session_active);
+
+        /* 2. ACL 拒绝无读权限的目标 1 (0x8002 ACCESS) */
+        const char *mcu_rrq = "SERVO_DRV_MCU";
+        assert(ecat_foe_ssc_on_read(&adapter, mcu_rrq, (uint16_t)strlen(mcu_rrq),
+                                    0xCAFE0001U, 64U, rx, &out_len) == ECAT_FOE_SSC_ERR_NORIGHTS);
+        assert(!adapter.session_active && !ecat_transfer_is_active(&transfer));
+
+        /* 3. 合法导出 128B (2 x 64B 满包 + 0B EOF 帧) */
+        assert(ecat_foe_ssc_on_read(&adapter, log_name, (uint16_t)strlen(log_name),
+                                    0xCAFE0001U, 64U, rx, &out_len) == 0U);
+        assert(out_len == 64U && adapter.session_active && log_drv.open_calls == 1U);
+        assert(ecat_foe_ssc_on_read_data(&adapter, 64U, 64U, rx + 64U, &out_len) == 0U);
+        assert(out_len == 64U && adapter.session_active && log_drv.close_calls == 0U);
+        /* 第 3 次拉取返回 0 字节 EOF 并释放租约与关闭只读会话 */
+        assert(ecat_foe_ssc_on_read_data(&adapter, 128U, 64U, rx, &out_len) == 0U);
+        assert(out_len == 0U && !adapter.session_active && !ecat_transfer_is_active(&transfer));
+        assert(log_drv.close_calls == 1U);
+        assert(memcmp(rx, log_drv.data, 128U) == 0);
+
+        /* 4. 单包短包导出 (40B < 64B) 首包即自动完成 */
+        log_drv.data_len = 40U;
+        memset(rx, 0, sizeof(rx));
+        assert(ecat_foe_ssc_on_read(&adapter, log_name, (uint16_t)strlen(log_name),
+                                    0xCAFE0001U, 64U, rx, &out_len) == 0U);
+        assert(out_len == 40U && !adapter.session_active && !ecat_transfer_is_active(&transfer));
+        assert(log_drv.open_calls == 2U && log_drv.close_calls == 2U);
+        assert(memcmp(rx, log_drv.data, 40U) == 0);
+        printf(" [PASS]\n");
+    }
+
+    /* [TEST 19] SSC RRQ 异常边界: 错位 offset / 中途 abort / 未完成固件禁读 */
+    {
+        printf("[TEST 19] 验证 SSC RRQ 错位 offset、中途 abort 与未完成固件禁读...");
+        mock_driver_init(&s_mock_drv);
+        test_ro_export_drv_t log_drv;
+        memset(&log_drv, 0, sizeof(log_drv));
+        log_drv.data_len = 100U;
+        for (size_t i = 0; i < log_drv.data_len; i++) {
+            log_drv.data[i] = (uint8_t)(i + 1U);
+        }
+
+        ecat_target_registry_t registry;
+        ecat_transfer_t transfer;
+        assert(ecat_target_registry_init(&registry) == 0);
+        ecat_target_desc_t fw_rw = {
+            .target_id = 1U, .name = "mcu", .type = ECAT_TARGET_TYPE_FIRMWARE,
+            .permissions = ECAT_PERM_RW, .max_size = TEST_MAX_SIZE, .write_unit = 8U,
+            .enabled = true,
+            .driver = { .io = s_mock_drv.driver, .read_open = ro_export_open, .read_close = ro_export_close },
+            .user_ctx = &s_mock_drv
+        };
+        ecat_target_desc_t log_ro = {
+            .target_id = 10U, .name = "flight_log", .type = ECAT_TARGET_TYPE_DATA,
+            .permissions = ECAT_PERM_READ, .max_size = sizeof(log_drv.data),
+            .enabled = true,
+            .driver = { .io = { .read = ro_export_read }, .read_open = ro_export_open, .read_close = ro_export_close, .get_data_size = ro_export_get_size },
+            .user_ctx = &log_drv
+        };
+        assert(ecat_target_registry_add(&registry, &fw_rw) == 0);
+        assert(ecat_target_registry_add(&registry, &log_ro) == 0);
+        setup_core_with_registry(&core, &registry, &adapter, 64U);
+        assert(ecat_transfer_init(&transfer, &registry, &core) == 0);
+        assert(ecat_foe_ssc_bind_transfer(&adapter, &transfer) == 0);
+
+        uint8_t rx[64];
+        uint16_t out_len = 0U;
+        const char *log_name = "flight_log";
+
+        /* 1. 错位 offset 返回 PACKETNO (0x8005) 并自动调用 read_close 释放租约 */
+        assert(ecat_foe_ssc_on_read(&adapter, log_name, (uint16_t)strlen(log_name), 0U, 64U, rx, &out_len) == 0U);
+        assert(out_len == 64U && adapter.session_active);
+        assert(ecat_foe_ssc_on_read_data(&adapter, 32U, 64U, rx, &out_len) == ECAT_FOE_SSC_ERR_PACKETNO);
+        assert(!adapter.session_active && !ecat_transfer_is_active(&transfer));
+        assert(log_drv.close_calls == 1U);
+
+        /* 2. 导出中途 abort 安全释放租约并调用 read_close */
+        assert(ecat_foe_ssc_on_read(&adapter, log_name, (uint16_t)strlen(log_name), 0U, 64U, rx, &out_len) == 0U);
+        assert(adapter.session_active);
+        ecat_foe_ssc_on_abort(&adapter, 0U);
+        assert(!adapter.session_active && !ecat_transfer_is_active(&transfer));
+        assert(log_drv.close_calls == 2U);
+
+        /* 3. 固件升级中途失败 (处于 upgrade_incomplete 态) 时严禁通过 RRQ 导出半成品 */
+        const char *wrq_fn = "SERVO_DRV_MCU_V1.0.0.0.efw";
+        uint8_t partial_payload[16] = {1};
+        uint8_t partial_fw[256];
+        (void)build_valid_firmware(partial_fw, sizeof(partial_fw), partial_payload, sizeof(partial_payload));
+        assert(ecat_foe_ssc_on_write(&adapter, wrq_fn, (uint16_t)strlen(wrq_fn), 0U) == 0U);
+        assert(ecat_foe_ssc_on_data(&adapter, partial_fw, 64U) == 0U);
+        assert(ecat_foe_ssc_on_data(&adapter, partial_fw + 64U, 64U) == 0U);
+        assert(ecat_foe_ssc_on_data(&adapter, partial_fw + 128U, 24U) != 0U);
+        assert(ecat_foe_core_target_upgrade_incomplete(&core, 1U) == true);
+        const char *mcu_rrq = "SERVO_DRV_MCU";
+        assert(ecat_foe_ssc_on_read(&adapter, mcu_rrq, (uint16_t)strlen(mcu_rrq), 0U, 64U, rx, &out_len) == ECAT_FOE_SSC_ERR_NORIGHTS);
+        assert(!adapter.session_active && !ecat_transfer_is_active(&transfer));
+        printf(" [PASS]\n");
+    }
+
+    printf("\n>>> Beckhoff SSC 适配层抽象契约 19 项测试全部通过 (Mock 环境) <<<\n");
     return 0;
 }

@@ -322,6 +322,105 @@ uint16_t ecat_foe_ssc_on_end(ecat_foe_ssc_adapter_t *adapter)
     return 0U;
 }
 
+uint16_t ecat_foe_ssc_on_read(ecat_foe_ssc_adapter_t *adapter,
+                              const char *pName,
+                              uint16_t nameSize,
+                              uint32_t password,
+                              uint16_t maxBlockSize,
+                              uint8_t *pData,
+                              uint16_t *outLength)
+{
+    if (adapter == NULL || adapter->core == NULL || pName == NULL ||
+        pData == NULL || outLength == NULL || maxBlockSize == 0U ||
+        !ssc_has_transport(adapter)) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+    *outLength = 0U;
+
+    if (password != adapter->expected_password) {
+        return ECAT_FOE_SSC_ERR_NORIGHTS_PW;
+    }
+
+    if (adapter->async_gate != NULL && adapter->session_active) {
+        ecat_foe_ssc_async_abort_session(adapter->async_gate);
+        adapter->session_active = false;
+    } else if (adapter->async_gate != NULL &&
+               (adapter->async_gate->pending || adapter->async_gate->completed)) {
+        ecat_foe_ssc_async_abort(adapter->async_gate);
+    }
+    adapter->async_final_acked = false;
+
+    int rc = ecat_foe_transport_begin_read(
+        &adapter->transport, pName, (size_t)nameSize, NULL);
+    if (rc != 0) {
+        adapter->session_active = false;
+        return (uint16_t)rc;
+    }
+
+    size_t actual = 0U;
+    rc = ecat_foe_transport_read(
+        &adapter->transport, pData, (size_t)maxBlockSize, &actual);
+    if (rc != 0) {
+        adapter->session_active = false;
+        return (uint16_t)rc;
+    }
+
+    *outLength = (uint16_t)actual;
+    adapter->session_active = ecat_foe_transport_owns(&adapter->transport);
+    if (!adapter->session_active && adapter->transport.committed) {
+        adapter->async_final_acked = true;
+    }
+    return 0U;
+}
+
+uint16_t ecat_foe_ssc_on_read_data(ecat_foe_ssc_adapter_t *adapter,
+                                   uint32_t offset,
+                                   uint16_t maxBlockSize,
+                                   uint8_t *pData,
+                                   uint16_t *outLength)
+{
+    if (adapter == NULL || adapter->core == NULL || outLength == NULL ||
+        !ssc_has_transport(adapter)) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+    *outLength = 0U;
+
+    if (!adapter->session_active ||
+        adapter->transport.direction != ECAT_TRANSFER_DIR_EXPORT ||
+        !ecat_foe_transport_owns(&adapter->transport)) {
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+
+    /* 严格校验偏移量顺序，防范乱序或重复请求静默错位返回下一块数据 */
+    uint32_t expected_offset = ecat_transfer_get_bytes_transferred(adapter->transport.transfer);
+    if (offset != expected_offset) {
+        ssc_abort_core(adapter);
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_PACKETNO;
+    }
+
+    if (!adapter->transport.export_zero_eof && (pData == NULL || maxBlockSize == 0U)) {
+        ssc_abort_core(adapter);
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_ILLEGAL;
+    }
+
+    size_t actual = 0U;
+    int rc = ecat_foe_transport_read(
+        &adapter->transport, pData, (size_t)maxBlockSize, &actual);
+    if (rc != 0) {
+        adapter->session_active = false;
+        return (uint16_t)rc;
+    }
+
+    *outLength = (uint16_t)actual;
+    adapter->session_active = ecat_foe_transport_owns(&adapter->transport);
+    if (!adapter->session_active && adapter->transport.committed) {
+        adapter->async_final_acked = true;
+    }
+    return 0U;
+}
+
 void ecat_foe_ssc_on_abort(ecat_foe_ssc_adapter_t *adapter, uint16_t errorCode)
 {
     (void)errorCode;

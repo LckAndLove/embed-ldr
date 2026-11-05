@@ -12,6 +12,8 @@ typedef struct {
     uint64_t token;
     void (*on_session_closed)(void *ctx); /**< Internal adapter notification after release. */
     void *session_closed_ctx;
+    ecat_transfer_dir_t direction; /**< 当前活跃会话方向 (IMPORT / EXPORT) */
+    bool export_zero_eof;          /**< 整包对齐导出后需补发 0 字节 EOF 帧再提交结束 */
     bool pending;
     bool begin_pending;           /**< 标记当前正在进行 begin 异步等待 */
     bool finish_after_write;
@@ -59,6 +61,15 @@ int ecat_foe_transport_set_shared_staged_buffer(ecat_foe_transport_t *transport,
 
 /* Returns FoE wire codes; a new WRQ can replace only this bridge's session. */
 int ecat_foe_transport_begin(ecat_foe_transport_t *transport, const char *name, size_t length);
+/* Resolve RRQ filename (target->name or <PROJECT>_<TARGET>) to target_id without side effects. */
+int ecat_foe_transport_resolve_read_target(const ecat_foe_transport_t *transport,
+    const char *name, size_t length, uint16_t *out_target_id);
+/* Start a read-only EXPORT session via FoE RRQ; returns FoE wire error codes. */
+int ecat_foe_transport_begin_read(ecat_foe_transport_t *transport,
+    const char *name, size_t length, uint32_t *out_total_size);
+/* Read next chunk from an active FoE EXPORT session; handles exact-block 0-byte EOF. */
+int ecat_foe_transport_read(ecat_foe_transport_t *transport,
+    uint8_t *out_buf, size_t max_length, size_t *out_length);
 ecat_upgrade_async_result_t ecat_foe_transport_start(void *ctx, const uint8_t *data,
     size_t length, bool more_data);
 ecat_upgrade_async_result_t ecat_foe_transport_poll(void *ctx);
