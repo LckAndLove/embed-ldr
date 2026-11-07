@@ -497,3 +497,56 @@ ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *e
     }
     return res;
 }
+
+static ecat_transfer_result_t endpoint_plugin_poll(void *plugin_ctx)
+{
+    return ecat_transport_endpoint_poll((ecat_transport_endpoint_t *)plugin_ctx);
+}
+
+static void endpoint_plugin_abort(void *plugin_ctx)
+{
+    ecat_transport_endpoint_abort((ecat_transport_endpoint_t *)plugin_ctx);
+}
+
+static bool endpoint_plugin_is_active(const void *plugin_ctx)
+{
+    return ecat_transport_endpoint_is_active((const ecat_transport_endpoint_t *)plugin_ctx);
+}
+
+static bool endpoint_plugin_is_pending(const void *plugin_ctx)
+{
+    return ecat_transport_endpoint_is_pending((const ecat_transport_endpoint_t *)plugin_ctx);
+}
+
+static const ecat_transport_plugin_ops_t s_endpoint_plugin_ops = {
+    endpoint_plugin_poll,
+    endpoint_plugin_abort,
+    endpoint_plugin_is_active,
+    endpoint_plugin_is_pending
+};
+
+int ecat_transport_endpoint_make_plugin_desc(
+    ecat_transport_endpoint_t *ep,
+    uint32_t capabilities,
+    ecat_transport_plugin_desc_t *out_desc)
+{
+    uint32_t resolved_caps;
+
+    if ((ep == NULL) || (out_desc == NULL) || (ep->transfer_mgr == NULL) || (ep->name[0] == '\0')) {
+        return -1;
+    }
+
+    resolved_caps = (capabilities != 0UL) ? capabilities
+        : (ECAT_TRANSPORT_CAP_BIDIRECTIONAL | ECAT_TRANSPORT_CAP_ASYNC);
+    if (((resolved_caps & ECAT_TRANSPORT_CAP_BIDIRECTIONAL) == 0UL) ||
+        ((resolved_caps & ~ECAT_TRANSPORT_CAP_ALL_MASK) != 0UL)) {
+        return -1;
+    }
+
+    out_desc->transport_id = ep->transport_id;
+    out_desc->name = ep->name;
+    out_desc->capabilities = resolved_caps;
+    out_desc->ops = &s_endpoint_plugin_ops;
+    out_desc->plugin_ctx = ep;
+    return 0;
+}

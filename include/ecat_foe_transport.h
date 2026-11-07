@@ -2,6 +2,7 @@
 #ifndef ECAT_FOE_TRANSPORT_H
 #define ECAT_FOE_TRANSPORT_H
 #include "ecat_transfer.h"
+#include "ecat_transport_plugin.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +78,11 @@ void ecat_foe_transport_abort(void *ctx);
 bool ecat_foe_transport_owns(const ecat_foe_transport_t *transport);
 /* Suitable for the existing SSC retry gate; final packet waits for commit. */
 const ecat_upgrade_async_ops_t *ecat_foe_transport_async_ops(void);
+/* Build a unified transport plugin descriptor for ecat_transport_registry_t. */
+int ecat_foe_transport_make_plugin_desc(
+    ecat_foe_transport_t *transport,
+    const char *name,
+    ecat_transport_plugin_desc_t *out_desc);
 #ifdef __cplusplus
 }
 #endif

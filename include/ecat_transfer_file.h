@@ -2,6 +2,7 @@
 #ifndef ECAT_TRANSFER_FILE_H
 #define ECAT_TRANSFER_FILE_H
 #include "ecat_transfer.h"
+#include "ecat_transport_plugin.h"
 #include <stdio.h>
 
 #ifdef __cplusplus
@@ -37,6 +38,12 @@ ecat_transfer_result_t ecat_transfer_file_begin(ecat_transfer_file_t *file,
  * retains ownership of FILE and must keep it and the buffer alive throughout. */
 ecat_transfer_result_t ecat_transfer_file_step(ecat_transfer_file_t *file);
 ecat_transfer_result_t ecat_transfer_file_cancel(ecat_transfer_file_t *file);
+/* Build a unified transport plugin descriptor for ecat_transport_registry_t. */
+int ecat_transfer_file_make_plugin_desc(
+    ecat_transfer_file_t *file,
+    uint16_t transport_id,
+    const char *name,
+    ecat_transport_plugin_desc_t *out_desc);
 
 #ifdef __cplusplus
 }

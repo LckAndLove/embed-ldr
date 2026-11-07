@@ -504,3 +504,58 @@ const ecat_upgrade_async_ops_t *ecat_foe_transport_async_ops(void)
     };
     return &ops;
 }
+
+static ecat_transfer_result_t foe_plugin_poll(void *plugin_ctx)
+{
+    ecat_foe_transport_t *transport = (ecat_foe_transport_t *)plugin_ctx;
+    ecat_upgrade_async_result_t ares;
+
+    if ((transport == NULL) || !ecat_foe_transport_owns(transport) || !transport->pending) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    ares = ecat_foe_transport_poll(transport);
+    if (ares == ECAT_UPGRADE_ASYNC_PENDING) {
+        return ECAT_TRANSFER_PENDING;
+    }
+    if (ares == ECAT_UPGRADE_ASYNC_COMPLETE) {
+        return ECAT_TRANSFER_COMPLETE;
+    }
+    return ECAT_TRANSFER_FAILED;
+}
+
+static bool foe_plugin_is_active(const void *plugin_ctx)
+{
+    return ecat_foe_transport_owns((const ecat_foe_transport_t *)plugin_ctx);
+}
+
+static bool foe_plugin_is_pending(const void *plugin_ctx)
+{
+    const ecat_foe_transport_t *transport = (const ecat_foe_transport_t *)plugin_ctx;
+    return (transport != NULL) && ecat_foe_transport_owns(transport) && transport->pending;
+}
+
+static const ecat_transport_plugin_ops_t s_foe_plugin_ops = {
+    foe_plugin_poll,
+    ecat_foe_transport_abort,
+    foe_plugin_is_active,
+    foe_plugin_is_pending
+};
+
+int ecat_foe_transport_make_plugin_desc(
+    ecat_foe_transport_t *transport,
+    const char *name,
+    ecat_transport_plugin_desc_t *out_desc)
+{
+    if ((transport == NULL) || (transport->transfer == NULL) || (out_desc == NULL) ||
+        (name == NULL) || (name[0] == '\0')) {
+        return -1;
+    }
+
+    out_desc->transport_id = ECAT_TRANSPORT_ID_FOE;
+    out_desc->name = name;
+    out_desc->capabilities = ECAT_TRANSPORT_CAP_BIDIRECTIONAL | ECAT_TRANSPORT_CAP_ASYNC;
+    out_desc->ops = &s_foe_plugin_ops;
+    out_desc->plugin_ctx = transport;
+    return 0;
+}

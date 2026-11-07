@@ -137,3 +137,51 @@ ecat_transfer_result_t ecat_transfer_file_step(ecat_transfer_file_t *f)
     f->ending = true;
     return advance(f, ecat_transfer_finish(f->transfer, f, f->token));
 }
+
+static ecat_transfer_result_t file_plugin_poll(void *plugin_ctx)
+{
+    return ecat_transfer_file_step((ecat_transfer_file_t *)plugin_ctx);
+}
+
+static void file_plugin_abort(void *plugin_ctx)
+{
+    (void)ecat_transfer_file_cancel((ecat_transfer_file_t *)plugin_ctx);
+}
+
+static bool file_plugin_is_active(const void *plugin_ctx)
+{
+    const ecat_transfer_file_t *file = (const ecat_transfer_file_t *)plugin_ctx;
+    return (file != NULL) && file->active;
+}
+
+static bool file_plugin_is_pending(const void *plugin_ctx)
+{
+    const ecat_transfer_file_t *file = (const ecat_transfer_file_t *)plugin_ctx;
+    return (file != NULL) && file->active && file->pending;
+}
+
+static const ecat_transport_plugin_ops_t s_file_plugin_ops = {
+    file_plugin_poll,
+    file_plugin_abort,
+    file_plugin_is_active,
+    file_plugin_is_pending
+};
+
+int ecat_transfer_file_make_plugin_desc(
+    ecat_transfer_file_t *file,
+    uint16_t transport_id,
+    const char *name,
+    ecat_transport_plugin_desc_t *out_desc)
+{
+    if ((file == NULL) || (file->transfer == NULL) || (out_desc == NULL) ||
+        (name == NULL) || (name[0] == '\0')) {
+        return -1;
+    }
+
+    out_desc->transport_id = transport_id;
+    out_desc->name = name;
+    out_desc->capabilities = ECAT_TRANSPORT_CAP_BIDIRECTIONAL | ECAT_TRANSPORT_CAP_ASYNC;
+    out_desc->ops = &s_file_plugin_ops;
+    out_desc->plugin_ctx = file;
+    return 0;
+}

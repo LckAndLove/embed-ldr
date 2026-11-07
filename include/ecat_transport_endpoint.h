@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "ecat_transfer.h"
+#include "ecat_transport_plugin.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -270,6 +271,18 @@ bool ecat_transport_endpoint_is_pending(const ecat_transport_endpoint_t *ep);
  *         其他为错误码 (同时触发 abort 事件通知并清理会话)
  */
 ecat_transfer_result_t ecat_transport_endpoint_poll(ecat_transport_endpoint_t *ep);
+
+/**
+ * @brief 构造该传输端点对应的统一通道插件描述符 (供注册到 ecat_transport_registry_t)
+ * @param ep 已初始化的端点句柄
+ * @param capabilities 能力位掩码 (ECAT_TRANSPORT_CAP_*，传 0 时默认使用 BIDIRECTIONAL | ASYNC)
+ * @param out_desc 输出的插件描述符
+ * @return 0 成功，-1 参数非法
+ */
+int ecat_transport_endpoint_make_plugin_desc(
+    ecat_transport_endpoint_t *ep,
+    uint32_t capabilities,
+    ecat_transport_plugin_desc_t *out_desc);
 
 #ifdef __cplusplus
 }
