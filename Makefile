@@ -34,7 +34,7 @@ ENABLE_FOE ?= 1
 ENABLE_FILE ?= 0
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
-UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c
+UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/plugins/ldr_format_efw.c src/ldr_loader.c
 ifeq ($(ENABLE_FILE),1)
 UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_transfer_file.c
 endif
@@ -120,7 +120,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-end-to-end test-upgrade-build
+test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-ldr-framework test-end-to-end test-upgrade-build
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -200,7 +200,7 @@ test-core-async:
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
 
-.PHONY: test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-end-to-end
+.PHONY: test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-ldr-framework test-end-to-end
 test-upgrade-session:
 	@TMP_SESSION_DIR=$$(mktemp -d /tmp/ecat_upgrade_session_XXXXXX) && \
 	trap 'rm -rf "$$TMP_SESSION_DIR"' EXIT INT TERM && \
@@ -230,6 +230,12 @@ test-transport-plugin:
 	trap 'rm -rf "$$TMP_PLG_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -o "$$TMP_PLG_DIR/test_transport_plugin" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/adapters/ecat_foe_transport.c src/adapters/ecat_transfer_file.c tests/test_transport_plugin.c && \
 	"$$TMP_PLG_DIR/test_transport_plugin"
+
+test-ldr-framework:
+	@TMP_LDR_DIR=$$(mktemp -d /tmp/ldr_fw_XXXXXX) && \
+	trap 'rm -rf "$$TMP_LDR_DIR"' EXIT INT TERM && \
+	$(CC) $(CFLAGS) -o "$$TMP_LDR_DIR/test_ldr_framework" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ldr_format_plugin.c src/plugins/ldr_format_efw.c src/ldr_loader.c tests/test_ldr_framework.c && \
+	"$$TMP_LDR_DIR/test_ldr_framework"
 
 test-end-to-end:
 	@TMP_E2E_DIR=$$(mktemp -d /tmp/ecat_e2e_XXXXXX) && \
@@ -326,6 +332,7 @@ test-asan:
 	@$(MAKE) test-transfer-bidirectional CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-transport-endpoint CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-transport-plugin CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
+	@$(MAKE) test-ldr-framework CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-end-to-end CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@echo "--- 编译并运行宿主示例套件 (ASan/UBSan 模式) ---"
