@@ -1,6 +1,6 @@
 /**
  * @file ldr_uart_transport_template.c
- * @brief 自定义双向传输通道插件参考模板实现 (BARR-C:2018 / MISRA-C 友好)
+ * @brief 自定义双向传输通道插件参考模板实现 (纯 ldr_ 命名, BARR-C:2018 / MISRA-C 友好)
  */
 
 #include "ldr_uart_transport_template.h"
@@ -69,7 +69,7 @@ int ldr_uart_transport_init(
     }
 
     (void)memset(uart, 0, sizeof(*uart));
-    if (ecat_transport_endpoint_init(&uart->endpoint, transport_id, name, transfer, uart) != 0) {
+    if (ldr_transport_endpoint_init(&uart->endpoint, transport_id, name, transfer, uart) != 0) {
         return -1;
     }
 
@@ -82,7 +82,7 @@ int ldr_uart_transport_init(
     cbs.on_progress = uart_on_progress;
     cbs.on_session_complete = uart_on_session_complete;
     cbs.on_session_abort = uart_on_session_abort;
-    ecat_transport_endpoint_set_callbacks(&uart->endpoint, &cbs);
+    ldr_transport_endpoint_set_callbacks(&uart->endpoint, &cbs);
 
     return 0;
 }
@@ -97,7 +97,7 @@ int ldr_uart_transport_register(
         return -1;
     }
 
-    if (ecat_transport_endpoint_make_plugin_desc(
+    if (ldr_transport_endpoint_make_plugin_desc(
             &uart->endpoint,
             LDR_TRANSPORT_CAP_BIDIRECTIONAL | LDR_TRANSPORT_CAP_ASYNC,
             &desc) != 0) {
@@ -116,7 +116,7 @@ ldr_transfer_result_t ldr_uart_transport_on_import_begin(
     if (uart == NULL) {
         return LDR_RES_INVALID;
     }
-    return ecat_transport_endpoint_begin_import(
+    return ldr_transport_endpoint_begin_import(
         &uart->endpoint, target_id, expected_size, fw_version);
 }
 
@@ -128,7 +128,7 @@ ldr_transfer_result_t ldr_uart_transport_on_import_data(
     if (uart == NULL) {
         return LDR_RES_INVALID;
     }
-    return ecat_transport_endpoint_write_chunk(&uart->endpoint, frame_data, frame_len);
+    return ldr_transport_endpoint_write_chunk(&uart->endpoint, frame_data, frame_len);
 }
 
 ldr_transfer_result_t ldr_uart_transport_on_import_end(
@@ -137,7 +137,7 @@ ldr_transfer_result_t ldr_uart_transport_on_import_end(
     if (uart == NULL) {
         return LDR_RES_INVALID;
     }
-    return ecat_transport_endpoint_finish_import(&uart->endpoint);
+    return ldr_transport_endpoint_finish_import(&uart->endpoint);
 }
 
 ldr_transfer_result_t ldr_uart_transport_on_export_begin(
@@ -148,7 +148,7 @@ ldr_transfer_result_t ldr_uart_transport_on_export_begin(
     if (uart == NULL) {
         return LDR_RES_INVALID;
     }
-    return ecat_transport_endpoint_begin_export(&uart->endpoint, target_id, out_total_size);
+    return ldr_transport_endpoint_begin_export(&uart->endpoint, target_id, out_total_size);
 }
 
 ldr_transfer_result_t ldr_uart_transport_pump_export_frame(
@@ -161,7 +161,7 @@ ldr_transfer_result_t ldr_uart_transport_pump_export_frame(
         return LDR_RES_INVALID;
     }
 
-    res = ecat_transport_endpoint_read_chunk(
+    res = ldr_transport_endpoint_read_chunk(
         &uart->endpoint, uart->tx_buf, uart->tx_buf_cap, &actual_read);
     if ((res != LDR_RES_CONTINUE) && (res != LDR_RES_COMPLETE)) {
         return res;
@@ -169,13 +169,13 @@ ldr_transfer_result_t ldr_uart_transport_pump_export_frame(
 
     if (actual_read > 0U) {
         if (uart->tx_fn(uart->tx_buf, actual_read, uart->hal_ctx) != 0) {
-            ecat_transport_endpoint_abort(&uart->endpoint);
+            ldr_transport_endpoint_abort(&uart->endpoint);
             return LDR_RES_FAILED;
         }
     }
 
     if (res == LDR_RES_COMPLETE) {
-        return ecat_transport_endpoint_finish_export(&uart->endpoint);
+        return ldr_transport_endpoint_finish_export(&uart->endpoint);
     }
     return LDR_RES_CONTINUE;
 }
@@ -185,5 +185,5 @@ void ldr_uart_transport_abort(ldr_uart_transport_t *uart)
     if (uart == NULL) {
         return;
     }
-    ecat_transport_endpoint_abort(&uart->endpoint);
+    ldr_transport_endpoint_abort(&uart->endpoint);
 }

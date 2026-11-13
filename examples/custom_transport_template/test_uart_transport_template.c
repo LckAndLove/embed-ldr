@@ -10,15 +10,6 @@
 #include "ldr_loader.h"
 #include "ldr_uart_transport_template.h"
 
-int port_get_version_floor(uint16_t target_id, uint32_t *out_floor)
-{
-    (void)target_id;
-    if (out_floor != NULL) {
-        *out_floor = 0U;
-    }
-    return 0;
-}
-
 typedef struct {
     uint8_t mem[256];
     uint32_t data_size;
@@ -134,7 +125,7 @@ int main(void)
     (void)memset(&wire, 0, sizeof(wire));
 
     /* 1. 完全去 FoE / FILE 初始化统一 Loader 框架 */
-    assert(ldr_loader_init(&loader, NULL) == 0);
+    assert(ldr_loader_init(&loader) == 0);
 
     /* 2. 注册目标存储插件 (配置参数区 ID=50) */
     ldr_target_desc_t target;

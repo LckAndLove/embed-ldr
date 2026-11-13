@@ -31,7 +31,7 @@ typedef enum {
  * cover one accepted input chunk; operation_capacity must cover the largest
  * write_unit and is at least 64 bytes for readback staging. The session/core
  * pair is non-copyable after binding. */
-typedef struct {
+typedef struct ecat_foe_core_async {
     ecat_foe_core_t *core;
     ecat_foe_target_async_t runner;
     uint8_t *packet;

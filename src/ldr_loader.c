@@ -3,10 +3,11 @@
  * @brief 统一可扩展双向 Loader 框架中性门面实现
  */
 
+#define LDR_NEUTRAL_BUILD 1
 #include "ldr_loader.h"
 #include <string.h>
 
-int ldr_loader_init(ldr_loader_t *loader, ecat_foe_core_t *fw_core)
+int ldr_loader_init(ldr_loader_t *loader)
 {
     if (loader == NULL) {
         return -1;
@@ -20,7 +21,7 @@ int ldr_loader_init(ldr_loader_t *loader, ecat_foe_core_t *fw_core)
     if (ldr_format_registry_init(&loader->formats) != 0) {
         return -1;
     }
-    if (ecat_transfer_init(&loader->transfer, &loader->targets, fw_core) != 0) {
+    if (ecat_transfer_init_neutral(&loader->transfer, &loader->targets) != 0) {
         return -1;
     }
     if (ecat_transport_registry_init(&loader->transports, &loader->transfer) != 0) {
@@ -29,6 +30,18 @@ int ldr_loader_init(ldr_loader_t *loader, ecat_foe_core_t *fw_core)
 
     loader->initialized = true;
     return 0;
+}
+
+int ldr_loader_bind_fw_backend(
+    ldr_loader_t *loader,
+    struct ecat_foe_core *fw_core,
+    const ldr_fw_backend_ops_t *ops,
+    ecat_upgrade_session_t *shared_session)
+{
+    if ((loader == NULL) || !loader->initialized) {
+        return -1;
+    }
+    return ecat_transfer_bind_fw_backend(&loader->transfer, fw_core, ops, shared_session);
 }
 
 int ldr_loader_register_target(

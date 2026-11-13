@@ -1,4 +1,5 @@
 #include "ecat_foe_core_internal.h"
+#include "ecat_transfer.h"
 #include "ecat_upgrade_session.h"
 /**
  * @file ecat_foe_core.c
@@ -1169,4 +1170,244 @@ const char *ecat_foe_core_get_project_name(const ecat_foe_core_t *core)
         return NULL;
     }
     return core->local_project_name;
+}
+
+/* -------------------------------------------------------------------------- */
+/*              可选固件后端虚表实现 (解耦 ecat_transfer.c 链接依赖)           */
+/* -------------------------------------------------------------------------- */
+
+static bool foe_fw_is_binding_valid(
+    const void *fw_ctx,
+    const ecat_target_registry_t *reg,
+    const void *shared_session)
+{
+    const ecat_foe_core_t *core = (const ecat_foe_core_t *)fw_ctx;
+    if (core == NULL) {
+        return false;
+    }
+    return core->is_configured &&
+           (core->registry == reg) &&
+           (core->shared_session == shared_session);
+}
+
+static bool foe_fw_is_busy(const void *fw_ctx)
+{
+    const ecat_foe_core_t *core = (const ecat_foe_core_t *)fw_ctx;
+    if (core == NULL) {
+        return false;
+    }
+    return (core->state == ECAT_FOE_STATE_WRQ_ACKED) ||
+           (core->state == ECAT_FOE_STATE_DATA) ||
+           core->session_active;
+}
+
+static bool foe_fw_validate_async_binding(
+    const void *fw_ctx,
+    const ecat_upgrade_async_ops_t *async_ops,
+    const void *async_ctx)
+{
+    const ecat_foe_core_t *core = (const ecat_foe_core_t *)fw_ctx;
+    if ((core == NULL) || (async_ops == NULL) || (async_ctx == NULL)) {
+        return false;
+    }
+    if (async_ops != ecat_foe_core_async_ops()) {
+        return false;
+    }
+    return (core->async_abort_hook == async_ops->abort) &&
+           (core->async_abort_ctx == async_ctx);
+}
+
+static int foe_fw_begin_target(
+    void *fw_ctx,
+    const ecat_target_desc_t *target,
+    uint16_t target_id,
+    uint32_t fw_version,
+    ecat_transfer_err_t *out_err)
+{
+    ecat_foe_core_t *core = (ecat_foe_core_t *)fw_ctx;
+    ecat_upgrade_request_t core_req;
+
+    if ((core == NULL) || (target == NULL)) {
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if (!ecat_foe_core_validate_fw_target(target, core->cfg.anti_rollback_enable)) {
+        if (out_err != NULL) {
+            bool missing_sync_cb = (!target->asynchronous) &&
+                ((target->driver.io.init == NULL) ||
+                 (target->driver.io.invalidate == NULL) ||
+                 (target->driver.io.erase_to == NULL) ||
+                 (target->driver.io.write == NULL) ||
+                 (target->driver.io.read == NULL) ||
+                 (target->driver.io.finalize == NULL) ||
+                 (target->driver.io.abort == NULL) ||
+                 (core->cfg.anti_rollback_enable &&
+                  (target->driver.io.finalize_with_version_floor == NULL)));
+            *out_err = missing_sync_cb ? ECAT_TRANSFER_ERR_DRIVER_WRITE
+                                       : ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if ((core->state == ECAT_FOE_STATE_SUCCESS) || (core->state == ECAT_FOE_STATE_ERROR)) {
+        ecat_foe_core_on_abort(core);
+    }
+
+    core_req.target_id = target_id;
+    core_req.fw_version = fw_version;
+    if (ecat_foe_core_begin_request(core, &core_req) != ECAT_FOE_CORE_OK) {
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    return 0;
+}
+
+static int foe_fw_on_data(
+    void *fw_ctx,
+    const ecat_target_desc_t *target,
+    const uint8_t *data,
+    uint32_t len,
+    ecat_transfer_err_t *out_err)
+{
+    ecat_foe_core_t *core = (ecat_foe_core_t *)fw_ctx;
+
+    if ((core == NULL) || (target == NULL)) {
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if (ecat_foe_core_on_data(core, data, len) != 0) {
+        if (out_err != NULL) {
+            *out_err = (core->last_error == ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED)
+                ? ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED
+                : ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if (core->header_complete) {
+        if ((core->hdr.payload_length > target->max_size) ||
+            (core->written_offset > target->max_size)) {
+            core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+            }
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int foe_fw_on_end(void *fw_ctx)
+{
+    ecat_foe_core_t *core = (ecat_foe_core_t *)fw_ctx;
+    if (core == NULL) {
+        return -1;
+    }
+    return ecat_foe_core_on_end(core);
+}
+
+static void foe_fw_on_abort(void *fw_ctx)
+{
+    ecat_foe_core_t *core = (ecat_foe_core_t *)fw_ctx;
+    if (core != NULL) {
+        ecat_foe_core_on_abort(core);
+    }
+}
+
+static void foe_fw_fail_with_reason(void *fw_ctx, ldr_fw_fail_reason_t reason)
+{
+    ecat_foe_core_t *core = (ecat_foe_core_t *)fw_ctx;
+    ecat_foe_core_err_t error;
+
+    if (core == NULL) {
+        return;
+    }
+
+    switch (reason) {
+    case LDR_FW_FAIL_OVER_RECEIVE:
+        error = ECAT_FOE_CORE_ERR_OVER_RECEIVE;
+        break;
+    case LDR_FW_FAIL_UNDER_RECEIVE:
+        error = ECAT_FOE_CORE_ERR_UNDER_RECEIVE;
+        break;
+    case LDR_FW_FAIL_PAYLOAD_LIMIT:
+        error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
+        break;
+    case LDR_FW_FAIL_INVALID_ARG:
+        error = ECAT_FOE_CORE_ERR_INVALID_ARG;
+        break;
+    case LDR_FW_FAIL_PRESERVE:
+    default:
+        error = core->last_error;
+        if (error == ECAT_FOE_CORE_OK) {
+            error = ECAT_FOE_CORE_ERR_INVALID_ARG;
+        }
+        break;
+    }
+
+    ecat_foe_core_on_abort(core);
+    core->state = ECAT_FOE_STATE_ERROR;
+    core->last_error = error;
+}
+
+static const ldr_fw_backend_ops_t s_foe_core_fw_backend_ops = {
+    ECAT_FOE_EFW_HEADER_MIN_LEN,
+    foe_fw_is_binding_valid,
+    foe_fw_is_busy,
+    foe_fw_validate_async_binding,
+    foe_fw_begin_target,
+    foe_fw_on_data,
+    foe_fw_on_end,
+    foe_fw_on_abort,
+    foe_fw_fail_with_reason
+};
+
+int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, struct ecat_foe_core *core)
+{
+    uint64_t generation = 0U;
+
+    if ((t == NULL) || (reg == NULL)) {
+        return -1;
+    }
+
+    if (core != NULL) {
+        if (!core->is_configured || (core->registry != reg)) {
+            return -1;
+        }
+        if ((core->shared_session != NULL) &&
+            (((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL)) {
+            return -1;
+        }
+        if (core->shared_session == &t->session) {
+            generation = t->session.generation;
+        }
+    }
+
+    if (ecat_transfer_init_neutral(t, reg) != 0) {
+        return -1;
+    }
+    t->session.generation = generation;
+
+    if (core != NULL) {
+        if (core->shared_session == NULL) {
+            core->shared_session = &t->session;
+        }
+        if (ecat_transfer_bind_fw_backend(
+                t, core, &s_foe_core_fw_backend_ops,
+                (ecat_upgrade_session_t *)core->shared_session) != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
 }

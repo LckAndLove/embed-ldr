@@ -10,15 +10,6 @@
 #include "ldr_loader.h"
 #include "ldr_format_efw.h"
 
-int port_get_version_floor(uint16_t target_id, uint32_t *out_floor)
-{
-    (void)target_id;
-    if (out_floor != NULL) {
-        *out_floor = 0U;
-    }
-    return 0;
-}
-
 /* -------------------------------------------------------------------------- */
 /*               自定义格式插件示例: "MYFW" (16 字节简化头部)                 */
 /* -------------------------------------------------------------------------- */
@@ -219,7 +210,7 @@ static void test_format_plugin_registry_and_autodetect(void)
     ldr_format_metadata_t meta;
     uint16_t hdr_size = 0U;
 
-    assert(ldr_loader_init(&loader, NULL) == 0);
+    assert(ldr_loader_init(&loader) == 0);
 
     (void)memset(&efw_ctx, 0, sizeof(efw_ctx));
     efw_ctx.enforce_policy = true;
@@ -291,8 +282,8 @@ static void test_foe_free_unified_loader_bidirectional(void)
 
     (void)memset(&drv, 0, sizeof(drv));
 
-    /* 完全去 FoE 化初始化: fw_core == NULL */
-    assert(ldr_loader_init(&loader, NULL) == 0);
+    /* 完全去 FoE 化初始化 (零 ecat_foe_core.c / 零 port_get_version_floor 链接) */
+    assert(ldr_loader_init(&loader) == 0);
     assert(!ldr_loader_is_busy(&loader));
 
     /* 注册存储目标插件 */
@@ -322,10 +313,10 @@ static void test_foe_free_unified_loader_bidirectional(void)
     ldr_loader_set_enforce_acl(&loader, true);
     assert(ldr_loader_add_acl(&loader, LDR_TRANSPORT_ID_CAN, 30U, LDR_PERM_RW) == 0);
 
-    /* 注册自定义双向 CAN 传输通道插件 */
-    assert(ecat_transport_endpoint_init(&can_ep, LDR_TRANSPORT_ID_CAN, "CAN_FD",
-                                        ldr_loader_get_transfer(&loader), NULL) == 0);
-    assert(ecat_transport_endpoint_make_plugin_desc(&can_ep, LDR_TRANSPORT_CAP_BIDIRECTIONAL, &ep_desc) == 0);
+    /* 注册自定义双向 CAN 传输通道插件 (纯 ldr_ API) */
+    assert(ldr_transport_endpoint_init(&can_ep, LDR_TRANSPORT_ID_CAN, "CAN_FD",
+                                       ldr_loader_get_transfer(&loader), NULL) == 0);
+    assert(ldr_transport_endpoint_make_plugin_desc(&can_ep, LDR_TRANSPORT_CAP_BIDIRECTIONAL, &ep_desc) == 0);
     assert(ldr_loader_register_transport(&loader, &ep_desc) == 0);
 
     /* 双向 IMPORT */
@@ -334,27 +325,27 @@ static void test_foe_free_unified_loader_bidirectional(void)
     for (i = 0U; i < sizeof(tx_data); ++i) {
         tx_data[i] = (uint8_t)(0x50U + i);
     }
-    assert(ecat_transport_endpoint_begin_import(&can_ep, 30U, sizeof(tx_data), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 30U, sizeof(tx_data), 0U) == LDR_RES_COMPLETE);
     assert(ldr_loader_is_busy(&loader));
     assert(ldr_loader_get_active_transport(&loader)->transport_id == LDR_TRANSPORT_ID_CAN);
-    assert(ecat_transport_endpoint_write_chunk(&can_ep, tx_data, sizeof(tx_data)) == LDR_RES_COMPLETE);
-    assert(ecat_transport_endpoint_finish_import(&can_ep) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, tx_data, sizeof(tx_data)) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&can_ep) == LDR_RES_COMPLETE);
     assert(!ldr_loader_is_busy(&loader));
 
     /* 双向 EXPORT */
     uint32_t export_total = 0U;
     uint8_t rx_data[64];
     size_t actual = 0U;
-    assert(ecat_transport_endpoint_begin_export(&can_ep, 30U, &export_total) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_begin_export(&can_ep, 30U, &export_total) == LDR_RES_COMPLETE);
     assert(export_total == sizeof(tx_data));
-    assert(ecat_transport_endpoint_read_chunk(&can_ep, rx_data, sizeof(rx_data), &actual) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_read_chunk(&can_ep, rx_data, sizeof(rx_data), &actual) == LDR_RES_COMPLETE);
     assert(actual == sizeof(tx_data));
     assert(memcmp(rx_data, tx_data, sizeof(tx_data)) == 0);
-    assert(ecat_transport_endpoint_finish_export(&can_ep) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_export(&can_ep) == LDR_RES_COMPLETE);
     assert(!ldr_loader_is_busy(&loader));
 
     /* 紧急 abort_all 恢复验证 */
-    assert(ecat_transport_endpoint_begin_export(&can_ep, 30U, &export_total) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_begin_export(&can_ep, 30U, &export_total) == LDR_RES_COMPLETE);
     assert(ldr_loader_is_busy(&loader));
     ldr_loader_abort_all(&loader);
     assert(!ldr_loader_is_busy(&loader));

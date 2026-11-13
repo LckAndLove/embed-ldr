@@ -1,6 +1,7 @@
 #include "ecat_foe_target_async_internal.h"
 #include "ecat_foe_core_internal.h"
 #include "ecat_foe_core_async.h"
+#include "ecat_transfer.h"
 #include "ecat_upgrade_session.h"
 
 #include <string.h>
@@ -657,4 +658,27 @@ static void async_abort(void *ctx)
     s->packet_cursor = 0U;
     s->packet_complete = false;
     s->end_requested = false;
+}
+
+int ecat_transfer_init_async_firmware(ecat_transfer_t *t, struct ecat_foe_core_async *session)
+{
+    const ecat_upgrade_session_t *lease;
+    const ecat_upgrade_async_ops_t *ops;
+
+    if ((t == NULL) || (t->core == NULL) || (session == NULL)) {
+        return -1;
+    }
+    lease = (t->session_ptr != NULL) ? t->session_ptr : &t->session;
+    if (t->active || (lease->owner != NULL)) {
+        return -1;
+    }
+    ops = ecat_foe_core_async_ops();
+    if ((session->core != t->core) ||
+        (t->core->async_abort_hook != ops->abort) ||
+        (t->core->async_abort_ctx != session)) {
+        return -1;
+    }
+    t->fw_async_ops = ops;
+    t->fw_async_ctx = session;
+    return 0;
 }

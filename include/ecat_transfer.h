@@ -19,9 +19,14 @@
 #include <stdbool.h>
 #include "ecat_upgrade_session.h"
 #include "ecat_target_registry.h"
-#include "ecat_foe_core.h"
 #include "ecat_upgrade_async.h"
+#ifndef LDR_NEUTRAL_BUILD
+#include "ecat_foe_core.h"
 #include "ecat_foe_core_async.h"
+#endif
+
+struct ecat_foe_core;
+struct ecat_foe_core_async;
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,10 +88,33 @@ typedef struct {
     uint32_t fw_version;            /* 固件版本号 (仅固件升级模式生效) */
 } ecat_transfer_request_t;
 
+/* 固件后端失败原因分类 (用于中性核心向可选固件后端透传诊断状态) */
+typedef enum {
+    LDR_FW_FAIL_PRESERVE = 0,
+    LDR_FW_FAIL_OVER_RECEIVE,
+    LDR_FW_FAIL_UNDER_RECEIVE,
+    LDR_FW_FAIL_PAYLOAD_LIMIT,
+    LDR_FW_FAIL_INVALID_ARG
+} ldr_fw_fail_reason_t;
+
+/* 可选固件升级后端操作虚表 (解除 ecat_transfer.c 对 ecat_foe_core 的直接符号耦合) */
+typedef struct {
+    uint32_t header_min_len;
+    bool (*is_binding_valid)(const void *fw_ctx, const ecat_target_registry_t *reg, const void *shared_session);
+    bool (*is_busy)(const void *fw_ctx);
+    bool (*validate_async_binding)(const void *fw_ctx, const ecat_upgrade_async_ops_t *async_ops, const void *async_ctx);
+    int (*begin_target)(void *fw_ctx, const ecat_target_desc_t *target, uint16_t target_id, uint32_t fw_version, ecat_transfer_err_t *out_err);
+    int (*on_data)(void *fw_ctx, const ecat_target_desc_t *target, const uint8_t *data, uint32_t len, ecat_transfer_err_t *out_err);
+    int (*on_end)(void *fw_ctx);
+    void (*on_abort)(void *fw_ctx);
+    void (*fail_with_reason)(void *fw_ctx, ldr_fw_fail_reason_t reason);
+} ldr_fw_backend_ops_t;
+
 /* 双向传输管理器上下文 */
 typedef struct {
     ecat_target_registry_t *registry;   /* 目标注册表指针 */
-    ecat_foe_core_t *core;              /* 可选: 底层 FoE 固件升级机 (若不升级固件可为 NULL) */
+    struct ecat_foe_core *core;         /* 可选: 底层固件升级机 (若不升级固件可为 NULL) */
+    const ldr_fw_backend_ops_t *fw_backend_ops; /* 可选: 固件后端虚表 (纯中性模式为 NULL) */
     ecat_upgrade_session_t session;     /* 互斥会话与租约令牌 */
     ecat_upgrade_session_t *session_ptr; /* 共享仲裁器会话指针 */
 
@@ -142,7 +170,29 @@ typedef struct {
  * @param core 可选固件升级核心状态机 (若不执行固件安全升级可传入 NULL)
  * @return 0 成功，-1 参数非法或尝试冲突绑定
  */
-int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe_core_t *core);
+/**
+ * @brief 初始化纯中性双向传输管理器 (零 FoE / 零 EFW 链接依赖)
+ * @param t 管理器上下文指针
+ * @param reg 目标注册表指针 (必须非空)
+ * @return 0 成功，-1 参数非法
+ */
+int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg);
+
+/**
+ * @brief 向已初始化的传输管理器绑定可选固件升级后端虚表
+ * @param t 管理器上下文指针
+ * @param core 固件核心上下文指针
+ * @param ops 固件后端操作虚表
+ * @param shared_session 可选共享会话仲裁器指针 (NULL 时使用管理器内置会话)
+ * @return 0 成功，-1 参数非法或绑定冲突
+ */
+int ecat_transfer_bind_fw_backend(
+    ecat_transfer_t *t,
+    struct ecat_foe_core *core,
+    const ldr_fw_backend_ops_t *ops,
+    ecat_upgrade_session_t *shared_session);
+
+int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, struct ecat_foe_core *core);
 
 /**
  * @brief 发起双向传输会话 (导入或导出)
@@ -303,7 +353,7 @@ int ecat_transfer_set_staging_buffer(
  * 会话必须由该管理器关联的固件核心初始化，且核心的中止钩子仍指向该会话；传输活跃期间不得重新绑定。
  * @return 0 成功，-1 参数非法或会话不属于该核心
  */
-int ecat_transfer_init_async_firmware(ecat_transfer_t *t, ecat_foe_core_async_t *session);
+int ecat_transfer_init_async_firmware(ecat_transfer_t *t, struct ecat_foe_core_async *session);
 
 /**
  * @brief 推进当前处于 PENDING 的异步操作进度

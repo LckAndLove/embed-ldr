@@ -17,6 +17,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#ifndef LDR_NEUTRAL_BUILD
+#define LDR_NEUTRAL_BUILD 1
+#endif
 #include "ecat_target_registry.h"
 #include "ecat_transfer.h"
 #include "ecat_transport_endpoint.h"
@@ -105,12 +108,25 @@ typedef struct {
 /* -------------------------------------------------------------------------- */
 
 /**
- * @brief 初始化统一 Loader 框架
+ * @brief 初始化统一中性 Loader 框架 (链接级零 FoE / 零 EFW 依赖)
  * @param loader 框架实例指针 (不可为 NULL)
- * @param fw_core 可选底层固件升级状态机 (不需要内置 EFW 固件状态机时传 NULL，实现完全去 FoE 化)
- * @return 0 成功，-1 参数非法或绑定失败
+ * @return 0 成功，-1 参数非法
  */
-int ldr_loader_init(ldr_loader_t *loader, ecat_foe_core_t *fw_core);
+int ldr_loader_init(ldr_loader_t *loader);
+
+/**
+ * @brief 向统一 Loader 框架绑定可选固件升级后端虚表
+ * @param loader 框架实例指针
+ * @param fw_core 固件核心上下文指针
+ * @param ops 固件后端操作虚表
+ * @param shared_session 可选共享会话仲裁器指针 (NULL 时使用内置会话)
+ * @return 0 成功，-1 参数非法或绑定冲突
+ */
+int ldr_loader_bind_fw_backend(
+    ldr_loader_t *loader,
+    struct ecat_foe_core *fw_core,
+    const ldr_fw_backend_ops_t *ops,
+    ecat_upgrade_session_t *shared_session);
 
 /**
  * @brief 注册目标存储区块插件 (固件区 / 参数区 / 日志区 / 自定义介质)
@@ -221,6 +237,107 @@ ldr_transport_registry_t *ldr_loader_get_transports(ldr_loader_t *loader);
  * @brief 获取镜像格式插件注册表句柄
  */
 ldr_format_registry_t *ldr_loader_get_formats(ldr_loader_t *loader);
+
+/* -------------------------------------------------------------------------- */
+/*                  纯 ldr_ 前缀传输端点封装 (消除 ecat_ 混用)                */
+/* -------------------------------------------------------------------------- */
+
+static inline int ldr_transport_endpoint_init(
+    ldr_transport_endpoint_t *ep,
+    uint16_t transport_id,
+    const char *name,
+    ldr_transfer_t *mgr,
+    void *user_ctx)
+{
+    return ecat_transport_endpoint_init(ep, transport_id, name, mgr, user_ctx);
+}
+
+static inline void ldr_transport_endpoint_set_callbacks(
+    ldr_transport_endpoint_t *ep,
+    const ldr_transport_callbacks_t *cbs)
+{
+    ecat_transport_endpoint_set_callbacks(ep, cbs);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_begin_import(
+    ldr_transport_endpoint_t *ep,
+    uint16_t target_id,
+    uint32_t expected_size,
+    uint32_t fw_version)
+{
+    return ecat_transport_endpoint_begin_import(ep, target_id, expected_size, fw_version);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_write_chunk(
+    ldr_transport_endpoint_t *ep,
+    const uint8_t *data,
+    size_t length)
+{
+    return ecat_transport_endpoint_write_chunk(ep, data, length);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_finish_import(
+    ldr_transport_endpoint_t *ep)
+{
+    return ecat_transport_endpoint_finish_import(ep);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_begin_export(
+    ldr_transport_endpoint_t *ep,
+    uint16_t target_id,
+    uint32_t *out_total_size)
+{
+    return ecat_transport_endpoint_begin_export(ep, target_id, out_total_size);
+}
+
+static inline uint32_t ldr_transport_endpoint_get_total_export_size(
+    const ldr_transport_endpoint_t *ep)
+{
+    return ecat_transport_endpoint_get_total_export_size(ep);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_read_chunk(
+    ldr_transport_endpoint_t *ep,
+    uint8_t *out_buf,
+    size_t buf_capacity,
+    size_t *actual_read)
+{
+    return ecat_transport_endpoint_read_chunk(ep, out_buf, buf_capacity, actual_read);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_finish_export(
+    ldr_transport_endpoint_t *ep)
+{
+    return ecat_transport_endpoint_finish_export(ep);
+}
+
+static inline void ldr_transport_endpoint_abort(ldr_transport_endpoint_t *ep)
+{
+    ecat_transport_endpoint_abort(ep);
+}
+
+static inline bool ldr_transport_endpoint_is_active(const ldr_transport_endpoint_t *ep)
+{
+    return ecat_transport_endpoint_is_active(ep);
+}
+
+static inline bool ldr_transport_endpoint_is_pending(const ldr_transport_endpoint_t *ep)
+{
+    return ecat_transport_endpoint_is_pending(ep);
+}
+
+static inline ldr_transfer_result_t ldr_transport_endpoint_poll(ldr_transport_endpoint_t *ep)
+{
+    return ecat_transport_endpoint_poll(ep);
+}
+
+static inline int ldr_transport_endpoint_make_plugin_desc(
+    ldr_transport_endpoint_t *ep,
+    uint32_t capabilities,
+    ldr_transport_plugin_desc_t *out_desc)
+{
+    return ecat_transport_endpoint_make_plugin_desc(ep, capabilities, out_desc);
+}
 
 #ifdef __cplusplus
 }

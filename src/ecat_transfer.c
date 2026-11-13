@@ -1,68 +1,64 @@
+#define LDR_NEUTRAL_BUILD 1
 #include "ecat_upgrade_session_internal.h"
-#include "ecat_foe_core_internal.h"
 /**
  * @file ecat_transfer.c
- * @brief 嵌入式多通道双向传输管理器实现
+ * @brief 嵌入式多通道双向传输管理器实现 (链接级零 FoE / 零 EFW 依赖)
  */
 
 #include "ecat_transfer.h"
-#include "ecat_foe_efw.h"
-#include "ecat_foe_core_async.h"
+#include "ldr_crc32.h"
 #include <string.h>
 
-/**
- * @brief 动态计算固件容器物理上限 (header + payload)
- *
- * 依据 EFW v0.2 规范 (docs/spec/efw-format-v0.2.md:53)，固件容器头部恒定为 148 字节 (ECAT_FOE_EFW_HEADER_MIN_LEN)；
- * 空包规避填充若存在亦计入 payload_length，容器传输流中绝不存在独立的尾部未覆盖填充区，
- * 传输流总字节数恒定有界于 header_length + payload_length。
- * 核心驱动层对物理介质不足 write_unit 的尾部对齐填充仅发生在设备内部缓冲写入阶段，不属于传输流容器尺寸。
- * 因此容器流物理总上限精确为: target->max_size + 148U。
- * 统一推导规则，使用 uint64 宽算术彻底防范 32 位整型加法溢出回绕。
- */
-static uint32_t calc_firmware_container_limit(const ecat_target_desc_t *target)
+#define LDR_DEFAULT_FW_HEADER_MIN_LEN 148U
+
+static uint32_t get_fw_header_min_len(const ecat_transfer_t *t)
 {
-    uint64_t wide_cap = (uint64_t)target->max_size + (uint64_t)ECAT_FOE_EFW_HEADER_MIN_LEN;
+    if ((t != NULL) && (t->fw_backend_ops != NULL) && (t->fw_backend_ops->header_min_len > 0U)) {
+        return t->fw_backend_ops->header_min_len;
+    }
+    return LDR_DEFAULT_FW_HEADER_MIN_LEN;
+}
+
+static uint32_t calc_firmware_container_limit(const ecat_transfer_t *t, const ecat_target_desc_t *target)
+{
+    uint64_t wide_cap = (uint64_t)target->max_size + (uint64_t)get_fw_header_min_len(t);
     return (wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap;
 }
 
-int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, ecat_foe_core_t *core)
+int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg)
 {
-    uint64_t generation = 0U;
-    if (t == NULL || reg == NULL) {
+    if ((t == NULL) || (reg == NULL)) {
         return -1;
     }
 
-    if (core != NULL) {
-        if (!core->is_configured || core->registry != reg) {
-            /* 严禁冲突或未配置绑定: 核心状态机必须已初始化且绑定同一个唯一权威注册表 */
-            return -1;
-        }
-        if (core->shared_session != NULL &&
-            ((const ecat_upgrade_session_t *)core->shared_session)->owner != NULL) {
-            return -1;
-        }
-        if (core->shared_session == &t->session) {
-            /* Reinitializing the primary manager must not revive old tokens. */
-            generation = t->session.generation;
-        }
-    }
-
-    memset(t, 0, sizeof(*t));
-    t->session.generation = generation;
+    (void)memset(t, 0, sizeof(*t));
     t->registry = reg;
-    t->core = core;
+    t->core = NULL;
+    t->fw_backend_ops = NULL;
+    t->session_ptr = &t->session;
     t->last_error = ECAT_TRANSFER_ERR_NONE;
+    return 0;
+}
 
-    if (core != NULL) {
-        if (core->shared_session == NULL) {
-            core->shared_session = &t->session;
-        }
-        t->session_ptr = (ecat_upgrade_session_t *)core->shared_session;
-    } else {
-        t->session_ptr = &t->session;
+int ecat_transfer_bind_fw_backend(
+    ecat_transfer_t *t,
+    struct ecat_foe_core *core,
+    const ldr_fw_backend_ops_t *ops,
+    ecat_upgrade_session_t *shared_session)
+{
+    if ((t == NULL) || (t->registry == NULL) || (core == NULL) || (ops == NULL)) {
+        return -1;
+    }
+    if (t->active) {
+        return -1;
+    }
+    if ((shared_session != NULL) && (shared_session->owner != NULL)) {
+        return -1;
     }
 
+    t->core = core;
+    t->fw_backend_ops = ops;
+    t->session_ptr = (shared_session != NULL) ? shared_session : &t->session;
     return 0;
 }
 
@@ -71,7 +67,7 @@ int ecat_transfer_set_staging_buffer(
     uint8_t *buf,
     size_t capacity)
 {
-    if (t == NULL || buf == NULL || capacity == 0U) {
+    if ((t == NULL) || (buf == NULL) || (capacity == 0U)) {
         return -1;
     }
     if (t->pending) {
@@ -79,19 +75,6 @@ int ecat_transfer_set_staging_buffer(
     }
     t->staging_buf = buf;
     t->staging_capacity = capacity;
-    return 0;
-}
-
-int ecat_transfer_init_async_firmware(ecat_transfer_t *t, ecat_foe_core_async_t *session)
-{
-    if (t == NULL || t->core == NULL || session == NULL) return -1;
-    const ecat_upgrade_session_t *lease = t->session_ptr != NULL ? t->session_ptr : &t->session;
-    if (t->active || lease->owner != NULL) return -1;
-    const ecat_upgrade_async_ops_t *ops = ecat_foe_core_async_ops();
-    if (session->core != t->core || t->core->async_abort_hook != ops->abort ||
-        t->core->async_abort_ctx != session) return -1;
-    t->fw_async_ops = ops;
-    t->fw_async_ctx = session;
     return 0;
 }
 
@@ -151,29 +134,30 @@ static void transfer_abort_firmware(ecat_transfer_t *t)
         transfer_abort_data(t);
         return;
     }
-    if (t->core_started && t->core != NULL) {
-        /* ecat_foe_core_on_abort 内部已包含 async_abort_hook 与底层驱动 abort 的安全单次调用 */
-        ecat_foe_core_on_abort(t->core);
+    if (t->core_started && (t->core != NULL) &&
+        (t->fw_backend_ops != NULL) && (t->fw_backend_ops->on_abort != NULL)) {
+        t->fw_backend_ops->on_abort(t->core);
         t->core_started = false;
-    } else if (t->fw_async_ops != NULL && t->fw_async_ops->abort != NULL) {
+    } else if ((t->fw_async_ops != NULL) && (t->fw_async_ops->abort != NULL)) {
         t->fw_async_ops->abort(t->fw_async_ctx);
-    } else if (t->driver_initialized && t->target != NULL && t->target->driver.io.abort != NULL) {
+    } else if (t->driver_initialized && (t->target != NULL) && (t->target->driver.io.abort != NULL)) {
         t->target->driver.io.abort(t->target->user_ctx);
     }
 }
 
-/* Preserve firmware diagnostics after cleanup, as required by protocol hooks. */
-static void transfer_fail_firmware_core(ecat_transfer_t *t)
+static void transfer_fail_firmware_core_reason(ecat_transfer_t *t, ldr_fw_fail_reason_t reason)
 {
-    if (t == NULL || t->core == NULL) {
+    if ((t == NULL) || (t->core == NULL) ||
+        (t->fw_backend_ops == NULL) || (t->fw_backend_ops->fail_with_reason == NULL)) {
         return;
     }
-    ecat_foe_core_err_t error = t->core->last_error;
-    if (error == ECAT_FOE_CORE_OK) error = ECAT_FOE_CORE_ERR_INVALID_ARG;
-    ecat_foe_core_on_abort(t->core);
-    t->core->state = ECAT_FOE_STATE_ERROR;
-    t->core->last_error = error;
+    t->fw_backend_ops->fail_with_reason(t->core, reason);
     t->core_started = false;
+}
+
+static void transfer_fail_firmware_core(ecat_transfer_t *t)
+{
+    transfer_fail_firmware_core_reason(t, LDR_FW_FAIL_PRESERVE);
 }
 
 static bool is_owned(const ecat_transfer_t *t, const void *owner, uint64_t token)
@@ -201,30 +185,27 @@ ecat_transfer_result_t ecat_transfer_begin(
         return ECAT_TRANSFER_INVALID;
     }
 
-    /* A core can be deinitialized and reconstructed at the same address.
-     * Do not let a manager from the old binding create a separate lease. */
-    if (t->core != NULL &&
-        (!t->core->is_configured || t->core->registry != t->registry ||
-         t->core->shared_session != get_transfer_session(t))) {
-        return ECAT_TRANSFER_INVALID;
-    }
-
-    /* 在任何会话获取、驱动调用或副作用前严格校验方向枚举有效性 */
-    if (request->direction != ECAT_TRANSFER_DIR_IMPORT &&
-        request->direction != ECAT_TRANSFER_DIR_EXPORT) {
-        return ECAT_TRANSFER_INVALID;
-    }
-
-    /* 检查 core 是否已被其它入口占用进行升级 */
     if (t->core != NULL) {
-        if (t->core->state == ECAT_FOE_STATE_WRQ_ACKED ||
-            t->core->state == ECAT_FOE_STATE_DATA ||
-            t->core->session_active) {
-            return ECAT_TRANSFER_BUSY;
+        if ((t->fw_backend_ops == NULL) ||
+            (t->fw_backend_ops->is_binding_valid == NULL) ||
+            !t->fw_backend_ops->is_binding_valid(t->core, t->registry, get_transfer_session(t))) {
+            return ECAT_TRANSFER_INVALID;
         }
     }
 
-    uint64_t acquired_token = 0;
+    /* 在任何会话获取、驱动调用或副作用前严格校验方向枚举有效性 */
+    if ((request->direction != ECAT_TRANSFER_DIR_IMPORT) &&
+        (request->direction != ECAT_TRANSFER_DIR_EXPORT)) {
+        return ECAT_TRANSFER_INVALID;
+    }
+
+    /* 检查固件后端是否已被其它入口占用进行升级 */
+    if ((t->core != NULL) && (t->fw_backend_ops != NULL) &&
+        (t->fw_backend_ops->is_busy != NULL) && t->fw_backend_ops->is_busy(t->core)) {
+        return ECAT_TRANSFER_BUSY;
+    }
+
+    uint64_t acquired_token = 0U;
     ecat_upgrade_session_result_t session_res =
         ecat_upgrade_session_acquire_mgr(get_transfer_session(t), t, owner, &acquired_token);
 
@@ -238,7 +219,7 @@ ecat_transfer_result_t ecat_transfer_begin(
     /* 查找目标区块描述符 */
     const ecat_target_desc_t *target =
         ecat_target_registry_find_by_id(t->registry, request->target_id);
-    if (target == NULL || !target->enabled) {
+    if ((target == NULL) || !target->enabled) {
         t->last_error = ECAT_TRANSFER_ERR_TARGET_NOT_FOUND;
         release_session(t, owner, acquired_token);
         return ECAT_TRANSFER_FAILED;
@@ -256,12 +237,12 @@ ecat_transfer_result_t ecat_transfer_begin(
     }
 
     /* 物理边界防越界检查 */
-    if (request->direction == ECAT_TRANSFER_DIR_IMPORT &&
-        target->type == ECAT_TARGET_TYPE_FIRMWARE) {
+    if ((request->direction == ECAT_TRANSFER_DIR_IMPORT) &&
+        (target->type == ECAT_TARGET_TYPE_FIRMWARE)) {
         if (request->expected_size > 0U) {
-            uint32_t limit = calc_firmware_container_limit(target);
-            if (request->expected_size < ECAT_FOE_EFW_HEADER_MIN_LEN ||
-                request->expected_size > limit) {
+            uint32_t limit = calc_firmware_container_limit(t, target);
+            if ((request->expected_size < get_fw_header_min_len(t)) ||
+                (request->expected_size > limit)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 release_session(t, owner, acquired_token);
                 return ECAT_TRANSFER_FAILED;
@@ -288,14 +269,14 @@ ecat_transfer_result_t ecat_transfer_begin(
     t->is_async = target->asynchronous;
     t->pending = false;
     t->stage = ECAT_TRANSFER_STAGE_NONE;
-    ecat_foe_crc32_init(&t->running_crc32);
+    ldr_crc32_init(&t->running_crc32);
 
     /* 异步驱动能力核验: 严禁假异步，缺少异步后端或 ops 时必须在任何驱动副作用前明确拒绝 */
     if (t->is_async) {
-        if (request->direction == ECAT_TRANSFER_DIR_IMPORT && target->type == ECAT_TARGET_TYPE_FIRMWARE) {
-            if (t->core == NULL || t->fw_async_ops != ecat_foe_core_async_ops() ||
-                t->fw_async_ctx == NULL || t->core->async_abort_hook != t->fw_async_ops->abort ||
-                t->core->async_abort_ctx != t->fw_async_ctx) {
+        if ((request->direction == ECAT_TRANSFER_DIR_IMPORT) && (target->type == ECAT_TARGET_TYPE_FIRMWARE)) {
+            if ((t->core == NULL) || (t->fw_backend_ops == NULL) ||
+                (t->fw_backend_ops->validate_async_binding == NULL) ||
+                !t->fw_backend_ops->validate_async_binding(t->core, t->fw_async_ops, t->fw_async_ctx)) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 release_session(t, owner, acquired_token);
@@ -398,27 +379,10 @@ ecat_transfer_result_t ecat_transfer_begin(
     } else {
         /* IMPORT 模式 */
         if (target->type == ECAT_TARGET_TYPE_FIRMWARE) {
-            if (t->core == NULL) {
+            ecat_transfer_err_t fw_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            if ((t->core == NULL) || (t->fw_backend_ops == NULL) ||
+                (t->fw_backend_ops->begin_target == NULL)) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-                t->active = false;
-                t->driver_initialized = false;
-                release_session(t, owner, acquired_token);
-                return ECAT_TRANSFER_FAILED;
-            }
-
-            if (!ecat_foe_core_validate_fw_target(target, t->core->cfg.anti_rollback_enable)) {
-                t->last_error = (!target->asynchronous &&
-                                 (target->driver.io.init == NULL ||
-                                  target->driver.io.invalidate == NULL ||
-                                  target->driver.io.erase_to == NULL ||
-                                  target->driver.io.write == NULL ||
-                                  target->driver.io.read == NULL ||
-                                  target->driver.io.finalize == NULL ||
-                                  target->driver.io.abort == NULL ||
-                                  (t->core->cfg.anti_rollback_enable &&
-                                   target->driver.io.finalize_with_version_floor == NULL)))
-                    ? ECAT_TRANSFER_ERR_DRIVER_WRITE
-                    : ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 t->driver_initialized = false;
                 release_session(t, owner, acquired_token);
@@ -426,17 +390,9 @@ ecat_transfer_result_t ecat_transfer_begin(
             }
 
             t->total_size = request->expected_size;
-
-            ecat_upgrade_request_t core_req;
-            core_req.target_id = request->target_id;
-            core_req.fw_version = request->fw_version;
-
-            if (t->core->state == ECAT_FOE_STATE_SUCCESS || t->core->state == ECAT_FOE_STATE_ERROR) {
-                ecat_foe_core_on_abort(t->core);
-            }
-
-            if (ecat_foe_core_begin_request(t->core, &core_req) != ECAT_FOE_CORE_OK) {
-                t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            if (t->fw_backend_ops->begin_target(
+                    t->core, target, request->target_id, request->fw_version, &fw_err) != 0) {
+                t->last_error = fw_err;
                 t->active = false;
                 t->driver_initialized = false;
                 release_session(t, owner, acquired_token);
@@ -599,7 +555,7 @@ ecat_transfer_result_t ecat_transfer_read(
             t->current_offset += (uint32_t)actual;
             *actual_read = actual;
             if (actual > 0U) {
-                ecat_foe_crc32_update(&t->running_crc32, out_buf, (uint32_t)actual);
+                ldr_crc32_update(&t->running_crc32, out_buf, (size_t)actual);
             }
             if (t->current_offset >= t->total_size) {
                 return ECAT_TRANSFER_COMPLETE;
@@ -632,7 +588,7 @@ ecat_transfer_result_t ecat_transfer_read(
     }
 
     t->current_offset += to_read;
-    ecat_foe_crc32_update(&t->running_crc32, out_buf, to_read);
+    ldr_crc32_update(&t->running_crc32, out_buf, (size_t)to_read);
     *actual_read = to_read;
 
     if (t->current_offset >= t->total_size) {
@@ -675,42 +631,37 @@ ecat_transfer_result_t ecat_transfer_write(
             return ECAT_TRANSFER_FAILED;
         }
 
-        /* 固件容器物理上限有界推导: 统一调用 calc_firmware_container_limit，防止加法溢出与扩展头拒绝 */
-        uint32_t limit = calc_firmware_container_limit(t->target);
+        uint32_t limit = calc_firmware_container_limit(t, t->target);
         uint32_t fw_cap = (t->total_size > 0U) ? t->total_size : limit;
 
-        /* 先用 size_t 与减法防环绕拒绝超界长度，保证 32 位与 64 位平台均绝不溢出 */
-        if (length > (size_t)UINT32_MAX ||
-            t->current_offset > fw_cap ||
-            length > (size_t)(fw_cap - t->current_offset)) {
+        if ((length > (size_t)UINT32_MAX) ||
+            (t->current_offset > fw_cap) ||
+            (length > (size_t)(fw_cap - t->current_offset))) {
+            ldr_fw_fail_reason_t reason = ((length <= (size_t)UINT32_MAX) &&
+                                           (t->current_offset <= limit) &&
+                                           (length <= (size_t)(limit - t->current_offset)))
+                ? LDR_FW_FAIL_OVER_RECEIVE
+                : LDR_FW_FAIL_PAYLOAD_LIMIT;
             t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-            t->core->last_error = (length <= (size_t)UINT32_MAX &&
-                                   t->current_offset <= limit &&
-                                   length <= (size_t)(limit - t->current_offset))
-                ? ECAT_FOE_CORE_ERR_OVER_RECEIVE
-                : ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
-            transfer_fail_firmware_core(t);
+            transfer_fail_firmware_core_reason(t, reason);
             t->active = false;
             release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
-        if (t->is_async && t->fw_async_ops != NULL) {
-            if (t->staging_buf == NULL || length > t->staging_capacity) {
+        if (t->is_async && (t->fw_async_ops != NULL)) {
+            if ((t->staging_buf == NULL) || (length > t->staging_capacity)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                t->core->last_error = ECAT_FOE_CORE_ERR_INVALID_ARG;
-                transfer_fail_firmware_core(t);
+                transfer_fail_firmware_core_reason(t, LDR_FW_FAIL_INVALID_ARG);
                 t->active = false;
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
-            /* 保证每一分块仅捕获一次稳定副本至 staging_buf，防范重叠内存未定义行为 */
-            if (t->staging_buf != data && length > 0U) {
-                memmove(t->staging_buf, data, length);
+            if ((t->staging_buf != data) && (length > 0U)) {
+                (void)memmove(t->staging_buf, data, length);
             }
-            /* 在传给下游 ops 之前计算候选 CRC，防范下游 memmove/别名改写 staging_buf 破坏 CRC 计算 */
             uint32_t candidate_crc = t->running_crc32;
-            ecat_foe_crc32_update(&candidate_crc, t->staging_buf, (uint32_t)length);
+            ldr_crc32_update(&candidate_crc, t->staging_buf, length);
 
             ecat_upgrade_async_result_t res = t->fw_async_ops->start(t->fw_async_ctx, t->staging_buf, length, true);
             if (res == ECAT_UPGRADE_ASYNC_PENDING) {
@@ -732,34 +683,25 @@ ecat_transfer_result_t ecat_transfer_write(
             }
         }
 
+        if ((t->fw_backend_ops == NULL) || (t->fw_backend_ops->on_data == NULL)) {
+            t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            t->active = false;
+            release_session(t, owner, token);
+            return ECAT_TRANSFER_FAILED;
+        }
+
         uint32_t len32 = (uint32_t)length;
-        if (ecat_foe_core_on_data(t->core, data, len32) != 0) {
-            if (t->core->last_error == ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED) {
-                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-            } else {
-                t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            }
+        ecat_transfer_err_t fw_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        if (t->fw_backend_ops->on_data(t->core, t->target, data, len32, &fw_err) != 0) {
+            t->last_error = fw_err;
             transfer_fail_firmware_core(t);
             t->active = false;
             release_session(t, owner, token);
             return ECAT_TRANSFER_FAILED;
         }
 
-        /* 持续执行注册表有效负载物理容量核验 */
-        if (t->core->header_complete) {
-            if (t->core->hdr.payload_length > t->target->max_size ||
-                t->core->written_offset > t->target->max_size) {
-                t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                t->core->last_error = ECAT_FOE_CORE_ERR_PAYLOAD_LIMIT_EXCEEDED;
-                transfer_fail_firmware_core(t);
-                t->active = false;
-                release_session(t, owner, token);
-                return ECAT_TRANSFER_FAILED;
-            }
-        }
-
         t->current_offset += len32;
-        ecat_foe_crc32_update(&t->running_crc32, data, len32);
+        ldr_crc32_update(&t->running_crc32, data, (size_t)len32);
     } else {
         /* DATA 普通数据流导入: 先用 size_t 与减法防环绕拒绝超界长度 */
         uint32_t write_limit = (t->expected_size > 0U) ? t->expected_size : t->target->max_size;
@@ -855,7 +797,7 @@ ecat_transfer_result_t ecat_transfer_write(
                     return ECAT_TRANSFER_FAILED;
                 }
                 t->current_offset += (uint32_t)actual;
-                ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
+                ldr_crc32_update(&t->running_crc32, t->staging_buf, actual);
                 return ECAT_TRANSFER_COMPLETE;
             } else {
                 t->last_error = ECAT_TRANSFER_ERR_DRIVER_WRITE;
@@ -909,7 +851,7 @@ ecat_transfer_result_t ecat_transfer_write(
         }
 
         t->current_offset += len32;
-        ecat_foe_crc32_update(&t->running_crc32, data, len32);
+        ldr_crc32_update(&t->running_crc32, data, (size_t)len32);
     }
 
     return ECAT_TRANSFER_COMPLETE;
@@ -965,13 +907,13 @@ ecat_transfer_result_t ecat_transfer_finish(
             }
         } else if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
             /* 异步固件导入核验 expected_size */
-            if (t->total_size > 0U && t->current_offset != t->total_size) {
+            if ((t->total_size > 0U) && (t->current_offset != t->total_size)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 if (t->core != NULL) {
-                    t->core->last_error = (t->current_offset < t->total_size)
-                        ? ECAT_FOE_CORE_ERR_UNDER_RECEIVE
-                        : ECAT_FOE_CORE_ERR_OVER_RECEIVE;
-                    transfer_fail_firmware_core(t);
+                    ldr_fw_fail_reason_t reason = (t->current_offset < t->total_size)
+                        ? LDR_FW_FAIL_UNDER_RECEIVE
+                        : LDR_FW_FAIL_OVER_RECEIVE;
+                    transfer_fail_firmware_core_reason(t, reason);
                 } else {
                     transfer_abort_firmware(t);
                 }
@@ -1051,13 +993,13 @@ ecat_transfer_result_t ecat_transfer_finish(
     } else {
         /* IMPORT 模式 */
         if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
-            if (t->total_size > 0U && t->current_offset != t->total_size) {
+            if ((t->total_size > 0U) && (t->current_offset != t->total_size)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
                 if (t->core != NULL) {
-                    t->core->last_error = (t->current_offset < t->total_size)
-                        ? ECAT_FOE_CORE_ERR_UNDER_RECEIVE
-                        : ECAT_FOE_CORE_ERR_OVER_RECEIVE;
-                    transfer_fail_firmware_core(t);
+                    ldr_fw_fail_reason_t reason = (t->current_offset < t->total_size)
+                        ? LDR_FW_FAIL_UNDER_RECEIVE
+                        : LDR_FW_FAIL_OVER_RECEIVE;
+                    transfer_fail_firmware_core_reason(t, reason);
                 }
                 t->core_started = false;
                 t->driver_initialized = false;
@@ -1066,7 +1008,8 @@ ecat_transfer_result_t ecat_transfer_finish(
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
-            if (t->core != NULL && ecat_foe_core_on_end(t->core) != 0) {
+            if ((t->core != NULL) && (t->fw_backend_ops != NULL) &&
+                (t->fw_backend_ops->on_end != NULL) && (t->fw_backend_ops->on_end(t->core) != 0)) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 transfer_fail_firmware_core(t);
                 t->driver_initialized = false;
@@ -1280,7 +1223,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                         return ECAT_TRANSFER_FAILED;
                     }
                     t->current_offset += (uint32_t)actual;
-                    ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
+                    ldr_crc32_update(&t->running_crc32, t->staging_buf, actual);
                     t->stage = ECAT_TRANSFER_STAGE_NONE;
                     return ECAT_TRANSFER_COMPLETE;
                 } else {
@@ -1315,7 +1258,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                     return ECAT_TRANSFER_FAILED;
                 }
                 t->current_offset += (uint32_t)actual;
-                ecat_foe_crc32_update(&t->running_crc32, t->staging_buf, (uint32_t)actual);
+                ldr_crc32_update(&t->running_crc32, t->staging_buf, actual);
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 return ECAT_TRANSFER_COMPLETE;
             } else if (t->stage == ECAT_TRANSFER_STAGE_READ) {
@@ -1345,7 +1288,7 @@ ecat_transfer_result_t ecat_transfer_poll(
                     *t->user_read_actual = actual;
                 }
                 if (actual > 0U && t->user_read_out_buf != NULL) {
-                    ecat_foe_crc32_update(&t->running_crc32, t->user_read_out_buf, (uint32_t)actual);
+                    ldr_crc32_update(&t->running_crc32, t->user_read_out_buf, actual);
                 }
                 t->stage = ECAT_TRANSFER_STAGE_NONE;
                 if (t->current_offset >= t->total_size) {
@@ -1398,7 +1341,7 @@ uint32_t ecat_transfer_get_crc32(const ecat_transfer_t *t)
     if (t == NULL) {
         return 0U;
     }
-    return ecat_foe_crc32_final(&t->running_crc32);
+    return ldr_crc32_final(&t->running_crc32);
 }
 
 uint32_t ecat_transfer_get_bytes_transferred(const ecat_transfer_t *t)

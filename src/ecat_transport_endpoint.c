@@ -3,6 +3,7 @@
  * @brief 通用传输端点抽象与自定义通道适配层实现
  */
 
+#define LDR_NEUTRAL_BUILD 1
 #include "ecat_transport_endpoint.h"
 #include <string.h>
 

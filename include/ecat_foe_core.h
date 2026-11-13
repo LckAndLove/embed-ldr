@@ -181,7 +181,7 @@ typedef struct {
  *   严禁浅拷贝或移动！由于底层驱动会话状态（物理扇区擦除水位、会话独占锁、增量 CRC）具有硬件唯一性，
  *   复制活动会话会导致多实例状态撕裂与物理硬件踩踏破坏。
  */
-typedef struct {
+typedef struct ecat_foe_core {
     ecat_foe_core_cfg_t cfg;                   /**< 本地静态配置拷贝 */
     bool                is_configured;         /**< 核心是否已通过合规静态配置校验 */
     ecat_foe_state_t    state;                 /**< 当前状态机状态 */

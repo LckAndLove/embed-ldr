@@ -3,6 +3,7 @@
  * @brief 统一传输通道插件注册与轮询中心实现
  */
 
+#define LDR_NEUTRAL_BUILD 1
 #include "ecat_transport_plugin.h"
 #include <string.h>
 
