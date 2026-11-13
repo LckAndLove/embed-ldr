@@ -32,9 +32,13 @@ TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 # Product library source selection; no test stubs are used for this target.
 ENABLE_FOE ?= 1
 ENABLE_FILE ?= 0
+ENABLE_EFW_PLUGIN ?= 1
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
-UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/plugins/ldr_format_efw.c src/ldr_loader.c
+UPGRADE_LIBRARY_SOURCES = src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_loader.c
+ifeq ($(ENABLE_EFW_PLUGIN),1)
+UPGRADE_LIBRARY_SOURCES += src/plugins/ldr_format_efw.c
+endif
 ifeq ($(ENABLE_FILE),1)
 UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_transfer_file.c
 endif
@@ -120,7 +124,7 @@ check-pdf-quotes:
 gen-pdf-table:
 	@$(PYTHON) tools/gen_pdf_cite_table.py --update
 
-test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-ldr-framework test-end-to-end test-upgrade-build
+test: test-examples test-ssc-async test-target-async test-core-async test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-ldr-framework test-ldr-trim-matrix test-end-to-end test-upgrade-build
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@TMP_BUILD_DIR=$$(mktemp -d /tmp/foe_build_test_XXXXXX) && \
 	trap 'rm -rf "$$TMP_BUILD_DIR"' EXIT INT TERM && \
@@ -200,7 +204,7 @@ test-core-async:
 test-sentinels:
 	@$(PYTHON) tests/test_repo_sentinels.py
 
-.PHONY: test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-ldr-framework test-end-to-end
+.PHONY: test-upgrade-session test-target-registry test-transfer-bidirectional test-transport-endpoint test-transport-plugin test-ldr-framework test-ldr-trim-matrix test-end-to-end
 test-upgrade-session:
 	@TMP_SESSION_DIR=$$(mktemp -d /tmp/ecat_upgrade_session_XXXXXX) && \
 	trap 'rm -rf "$$TMP_SESSION_DIR"' EXIT INT TERM && \
@@ -236,6 +240,26 @@ test-ldr-framework:
 	trap 'rm -rf "$$TMP_LDR_DIR"' EXIT INT TERM && \
 	$(CC) $(CFLAGS) -o "$$TMP_LDR_DIR/test_ldr_framework" src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ldr_format_plugin.c src/plugins/ldr_format_efw.c src/ldr_loader.c tests/test_ldr_framework.c && \
 	"$$TMP_LDR_DIR/test_ldr_framework"
+
+test-ldr-trim-matrix:
+	@TMP_MTX_DIR=$$(mktemp -d /tmp/ldr_mtx_XXXXXX) && \
+	trap 'rm -rf "$$TMP_MTX_DIR"' EXIT INT TERM && \
+	echo "--- 验证构建裁剪矩阵 (4 种独立静态库配置 + 自定义 UART 双向模板) ---" && \
+	CORE_SRCS="src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_loader.c" && \
+	mkdir -p "$$TMP_MTX_DIR/m1" "$$TMP_MTX_DIR/m2" "$$TMP_MTX_DIR/m3" "$$TMP_MTX_DIR/m4" && \
+	for s in $$CORE_SRCS; do $(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c "$$s" -o "$$TMP_MTX_DIR/m1/$$(basename "$$s" .c).o" || exit 1; done && \
+	$(AR) rcs "$$TMP_MTX_DIR/lib_neutral_only.a" "$$TMP_MTX_DIR/m1/"*.o && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -Iexamples/custom_transport_template -o "$$TMP_MTX_DIR/test_uart_template" examples/custom_transport_template/ldr_uart_transport_template.c examples/custom_transport_template/test_uart_transport_template.c "$$TMP_MTX_DIR/lib_neutral_only.a" && \
+	"$$TMP_MTX_DIR/test_uart_template" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/plugins/ldr_format_efw.c -o "$$TMP_MTX_DIR/m2/ldr_format_efw.o" && \
+	$(AR) rcs "$$TMP_MTX_DIR/lib_with_efw.a" "$$TMP_MTX_DIR/m1/"*.o "$$TMP_MTX_DIR/m2/ldr_format_efw.o" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/adapters/ecat_transfer_file.c -o "$$TMP_MTX_DIR/m3/ecat_transfer_file.o" && \
+	$(AR) rcs "$$TMP_MTX_DIR/lib_with_file.a" "$$TMP_MTX_DIR/m1/"*.o "$$TMP_MTX_DIR/m3/ecat_transfer_file.o" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/adapters/ecat_foe_transport.c -o "$$TMP_MTX_DIR/m4/ecat_foe_transport.o" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/adapters/ecat_foe_ssc.c -o "$$TMP_MTX_DIR/m4/ecat_foe_ssc.o" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/adapters/ecat_foe_ssc_async.c -o "$$TMP_MTX_DIR/m4/ecat_foe_ssc_async.o" && \
+	$(AR) rcs "$$TMP_MTX_DIR/lib_full_ssc_file.a" "$$TMP_MTX_DIR/m1/"*.o "$$TMP_MTX_DIR/m2/ldr_format_efw.o" "$$TMP_MTX_DIR/m3/ecat_transfer_file.o" "$$TMP_MTX_DIR/m4/"*.o && \
+	echo "  [PASS] 4 种构建裁剪矩阵静态库编译与自定义双向通道模板验证全部通过"
 
 test-end-to-end:
 	@TMP_E2E_DIR=$$(mktemp -d /tmp/ecat_e2e_XXXXXX) && \
@@ -333,6 +357,7 @@ test-asan:
 	@$(MAKE) test-transport-endpoint CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-transport-plugin CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-ldr-framework CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
+	@$(MAKE) test-ldr-trim-matrix CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@$(MAKE) test-end-to-end CC="$(CC)" CFLAGS="$(CFLAGS) -fsanitize=address,undefined -g"
 	@which pdftotext >/dev/null 2>&1 || (echo "错误: pdftotext 缺失，请安装 poppler-utils (macOS: brew install poppler)" && exit 1)
 	@echo "--- 编译并运行宿主示例套件 (ASan/UBSan 模式) ---"
