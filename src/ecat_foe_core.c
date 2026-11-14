@@ -1362,6 +1362,7 @@ static void foe_fw_fail_with_reason(void *fw_ctx, ldr_fw_fail_reason_t reason)
 
 static const ldr_fw_backend_ops_t s_foe_core_fw_backend_ops = {
     ECAT_FOE_EFW_HEADER_MIN_LEN,
+    ECAT_FOE_EFW_HEADER_MIN_LEN,
     foe_fw_is_binding_valid,
     foe_fw_is_busy,
     foe_fw_validate_async_binding,
@@ -1402,9 +1403,11 @@ int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, struct e
         if (core->shared_session == NULL) {
             core->shared_session = &t->session;
         }
+        t->core = core;
         if (ecat_transfer_bind_fw_backend(
                 t, core, &s_foe_core_fw_backend_ops,
                 (ecat_upgrade_session_t *)core->shared_session) != 0) {
+            t->core = NULL;
             return -1;
         }
     }

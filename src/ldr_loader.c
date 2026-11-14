@@ -34,14 +34,14 @@ int ldr_loader_init(ldr_loader_t *loader)
 
 int ldr_loader_bind_fw_backend(
     ldr_loader_t *loader,
-    struct ecat_foe_core *fw_core,
+    void *fw_ctx,
     const ldr_fw_backend_ops_t *ops,
     ecat_upgrade_session_t *shared_session)
 {
     if ((loader == NULL) || !loader->initialized) {
         return -1;
     }
-    return ecat_transfer_bind_fw_backend(&loader->transfer, fw_core, ops, shared_session);
+    return ecat_transfer_bind_fw_backend(&loader->transfer, fw_ctx, ops, shared_session);
 }
 
 int ldr_loader_register_target(

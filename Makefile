@@ -35,7 +35,7 @@ ENABLE_FILE ?= 0
 ENABLE_EFW_PLUGIN ?= 1
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
-UPGRADE_LIBRARY_SOURCES = src/ldr_crc32.c src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_loader.c
+UPGRADE_LIBRARY_SOURCES = src/ldr_crc32.c src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_fw_pipeline.c src/ldr_loader.c
 ifeq ($(ENABLE_EFW_PLUGIN),1)
 UPGRADE_LIBRARY_SOURCES += src/plugins/ldr_format_efw.c
 endif
@@ -238,14 +238,14 @@ test-transport-plugin:
 test-ldr-framework:
 	@TMP_LDR_DIR=$$(mktemp -d /tmp/ldr_fw_XXXXXX) && \
 	trap 'rm -rf "$$TMP_LDR_DIR"' EXIT INT TERM && \
-	$(CC) $(CFLAGS) -o "$$TMP_LDR_DIR/test_ldr_framework" src/ldr_crc32.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ldr_format_plugin.c src/plugins/ldr_format_efw.c src/ldr_loader.c tests/test_ldr_framework.c && \
+	$(CC) $(CFLAGS) -o "$$TMP_LDR_DIR/test_ldr_framework" src/ldr_crc32.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ecat_target_registry.c src/ecat_upgrade_session.c src/ecat_foe_efw.c src/ldr_format_plugin.c src/plugins/ldr_format_efw.c src/ldr_fw_pipeline.c src/ldr_loader.c tests/test_ldr_framework.c && \
 	"$$TMP_LDR_DIR/test_ldr_framework"
 
 test-ldr-trim-matrix:
 	@TMP_MTX_DIR=$$(mktemp -d /tmp/ldr_mtx_XXXXXX) && \
 	trap 'rm -rf "$$TMP_MTX_DIR"' EXIT INT TERM && \
 	echo "--- 验证构建裁剪矩阵 (4 种独立静态库配置 + 链接级零 FoE 依赖核验) ---" && \
-	NEUTRAL_SRCS="src/ldr_crc32.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_loader.c" && \
+	NEUTRAL_SRCS="src/ldr_crc32.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_fw_pipeline.c src/ldr_loader.c" && \
 	FOE_CORE_SRCS="src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c" && \
 	mkdir -p "$$TMP_MTX_DIR/m1" "$$TMP_MTX_DIR/m2" "$$TMP_MTX_DIR/m3" "$$TMP_MTX_DIR/m4" && \
 	for s in $$NEUTRAL_SRCS; do $(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c "$$s" -o "$$TMP_MTX_DIR/m1/$$(basename "$$s" .c).o" || exit 1; done && \

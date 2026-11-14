@@ -100,6 +100,7 @@ typedef enum {
 /* 可选固件升级后端操作虚表 (解除 ecat_transfer.c 对 ecat_foe_core 的直接符号耦合) */
 typedef struct {
     uint32_t header_min_len;
+    uint32_t header_max_len;
     bool (*is_binding_valid)(const void *fw_ctx, const ecat_target_registry_t *reg, const void *shared_session);
     bool (*is_busy)(const void *fw_ctx);
     bool (*validate_async_binding)(const void *fw_ctx, const ecat_upgrade_async_ops_t *async_ops, const void *async_ctx);
@@ -113,7 +114,8 @@ typedef struct {
 /* 双向传输管理器上下文 */
 typedef struct {
     ecat_target_registry_t *registry;   /* 目标注册表指针 */
-    struct ecat_foe_core *core;         /* 可选: 底层固件升级机 (若不升级固件可为 NULL) */
+    struct ecat_foe_core *core;         /* 可选: 兼容旧 FoE 固件升级机指针 (纯中性后端时为 NULL) */
+    void *fw_backend_ctx;               /* 可选: 类型安全固件后端上下文 (FoE core 或 ldr_fw_pipeline_t) */
     const ldr_fw_backend_ops_t *fw_backend_ops; /* 可选: 固件后端虚表 (纯中性模式为 NULL) */
     ecat_upgrade_session_t session;     /* 互斥会话与租约令牌 */
     ecat_upgrade_session_t *session_ptr; /* 共享仲裁器会话指针 */
@@ -188,7 +190,7 @@ int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg);
  */
 int ecat_transfer_bind_fw_backend(
     ecat_transfer_t *t,
-    struct ecat_foe_core *core,
+    void *fw_ctx,
     const ldr_fw_backend_ops_t *ops,
     ecat_upgrade_session_t *shared_session);
 

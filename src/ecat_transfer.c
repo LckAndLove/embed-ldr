@@ -19,9 +19,17 @@ static uint32_t get_fw_header_min_len(const ecat_transfer_t *t)
     return LDR_DEFAULT_FW_HEADER_MIN_LEN;
 }
 
+static uint32_t get_fw_header_max_len(const ecat_transfer_t *t)
+{
+    if ((t != NULL) && (t->fw_backend_ops != NULL) && (t->fw_backend_ops->header_max_len > 0U)) {
+        return t->fw_backend_ops->header_max_len;
+    }
+    return get_fw_header_min_len(t);
+}
+
 static uint32_t calc_firmware_container_limit(const ecat_transfer_t *t, const ecat_target_desc_t *target)
 {
-    uint64_t wide_cap = (uint64_t)target->max_size + (uint64_t)get_fw_header_min_len(t);
+    uint64_t wide_cap = (uint64_t)target->max_size + (uint64_t)get_fw_header_max_len(t);
     return (wide_cap > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)wide_cap;
 }
 
@@ -34,6 +42,7 @@ int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg)
     (void)memset(t, 0, sizeof(*t));
     t->registry = reg;
     t->core = NULL;
+    t->fw_backend_ctx = NULL;
     t->fw_backend_ops = NULL;
     t->session_ptr = &t->session;
     t->last_error = ECAT_TRANSFER_ERR_NONE;
@@ -42,11 +51,11 @@ int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg)
 
 int ecat_transfer_bind_fw_backend(
     ecat_transfer_t *t,
-    struct ecat_foe_core *core,
+    void *fw_ctx,
     const ldr_fw_backend_ops_t *ops,
     ecat_upgrade_session_t *shared_session)
 {
-    if ((t == NULL) || (t->registry == NULL) || (core == NULL) || (ops == NULL)) {
+    if ((t == NULL) || (t->registry == NULL) || (fw_ctx == NULL) || (ops == NULL)) {
         return -1;
     }
     if (t->active) {
@@ -56,7 +65,7 @@ int ecat_transfer_bind_fw_backend(
         return -1;
     }
 
-    t->core = core;
+    t->fw_backend_ctx = fw_ctx;
     t->fw_backend_ops = ops;
     t->session_ptr = (shared_session != NULL) ? shared_session : &t->session;
     return 0;
@@ -134,9 +143,9 @@ static void transfer_abort_firmware(ecat_transfer_t *t)
         transfer_abort_data(t);
         return;
     }
-    if (t->core_started && (t->core != NULL) &&
+    if (t->core_started && (t->fw_backend_ctx != NULL) &&
         (t->fw_backend_ops != NULL) && (t->fw_backend_ops->on_abort != NULL)) {
-        t->fw_backend_ops->on_abort(t->core);
+        t->fw_backend_ops->on_abort(t->fw_backend_ctx);
         t->core_started = false;
     } else if ((t->fw_async_ops != NULL) && (t->fw_async_ops->abort != NULL)) {
         t->fw_async_ops->abort(t->fw_async_ctx);
@@ -147,11 +156,11 @@ static void transfer_abort_firmware(ecat_transfer_t *t)
 
 static void transfer_fail_firmware_core_reason(ecat_transfer_t *t, ldr_fw_fail_reason_t reason)
 {
-    if ((t == NULL) || (t->core == NULL) ||
+    if ((t == NULL) || (t->fw_backend_ctx == NULL) ||
         (t->fw_backend_ops == NULL) || (t->fw_backend_ops->fail_with_reason == NULL)) {
         return;
     }
-    t->fw_backend_ops->fail_with_reason(t->core, reason);
+    t->fw_backend_ops->fail_with_reason(t->fw_backend_ctx, reason);
     t->core_started = false;
 }
 
@@ -185,10 +194,10 @@ ecat_transfer_result_t ecat_transfer_begin(
         return ECAT_TRANSFER_INVALID;
     }
 
-    if (t->core != NULL) {
+    if (t->fw_backend_ctx != NULL) {
         if ((t->fw_backend_ops == NULL) ||
             (t->fw_backend_ops->is_binding_valid == NULL) ||
-            !t->fw_backend_ops->is_binding_valid(t->core, t->registry, get_transfer_session(t))) {
+            !t->fw_backend_ops->is_binding_valid(t->fw_backend_ctx, t->registry, get_transfer_session(t))) {
             return ECAT_TRANSFER_INVALID;
         }
     }
@@ -200,8 +209,8 @@ ecat_transfer_result_t ecat_transfer_begin(
     }
 
     /* 检查固件后端是否已被其它入口占用进行升级 */
-    if ((t->core != NULL) && (t->fw_backend_ops != NULL) &&
-        (t->fw_backend_ops->is_busy != NULL) && t->fw_backend_ops->is_busy(t->core)) {
+    if ((t->fw_backend_ctx != NULL) && (t->fw_backend_ops != NULL) &&
+        (t->fw_backend_ops->is_busy != NULL) && t->fw_backend_ops->is_busy(t->fw_backend_ctx)) {
         return ECAT_TRANSFER_BUSY;
     }
 
@@ -274,9 +283,9 @@ ecat_transfer_result_t ecat_transfer_begin(
     /* 异步驱动能力核验: 严禁假异步，缺少异步后端或 ops 时必须在任何驱动副作用前明确拒绝 */
     if (t->is_async) {
         if ((request->direction == ECAT_TRANSFER_DIR_IMPORT) && (target->type == ECAT_TARGET_TYPE_FIRMWARE)) {
-            if ((t->core == NULL) || (t->fw_backend_ops == NULL) ||
+            if ((t->fw_backend_ctx == NULL) || (t->fw_backend_ops == NULL) ||
                 (t->fw_backend_ops->validate_async_binding == NULL) ||
-                !t->fw_backend_ops->validate_async_binding(t->core, t->fw_async_ops, t->fw_async_ctx)) {
+                !t->fw_backend_ops->validate_async_binding(t->fw_backend_ctx, t->fw_async_ops, t->fw_async_ctx)) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
                 release_session(t, owner, acquired_token);
@@ -380,7 +389,7 @@ ecat_transfer_result_t ecat_transfer_begin(
         /* IMPORT 模式 */
         if (target->type == ECAT_TARGET_TYPE_FIRMWARE) {
             ecat_transfer_err_t fw_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            if ((t->core == NULL) || (t->fw_backend_ops == NULL) ||
+            if ((t->fw_backend_ctx == NULL) || (t->fw_backend_ops == NULL) ||
                 (t->fw_backend_ops->begin_target == NULL)) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 t->active = false;
@@ -391,7 +400,7 @@ ecat_transfer_result_t ecat_transfer_begin(
 
             t->total_size = request->expected_size;
             if (t->fw_backend_ops->begin_target(
-                    t->core, target, request->target_id, request->fw_version, &fw_err) != 0) {
+                    t->fw_backend_ctx, target, request->target_id, request->fw_version, &fw_err) != 0) {
                 t->last_error = fw_err;
                 t->active = false;
                 t->driver_initialized = false;
@@ -626,7 +635,7 @@ ecat_transfer_result_t ecat_transfer_write(
     }
 
     if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
-        if (t->core == NULL) {
+        if ((t->fw_backend_ctx == NULL) || (t->fw_backend_ops == NULL)) {
             t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
             return ECAT_TRANSFER_FAILED;
         }
@@ -683,7 +692,7 @@ ecat_transfer_result_t ecat_transfer_write(
             }
         }
 
-        if ((t->fw_backend_ops == NULL) || (t->fw_backend_ops->on_data == NULL)) {
+        if (t->fw_backend_ops->on_data == NULL) {
             t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
             t->active = false;
             release_session(t, owner, token);
@@ -692,7 +701,7 @@ ecat_transfer_result_t ecat_transfer_write(
 
         uint32_t len32 = (uint32_t)length;
         ecat_transfer_err_t fw_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-        if (t->fw_backend_ops->on_data(t->core, t->target, data, len32, &fw_err) != 0) {
+        if (t->fw_backend_ops->on_data(t->fw_backend_ctx, t->target, data, len32, &fw_err) != 0) {
             t->last_error = fw_err;
             transfer_fail_firmware_core(t);
             t->active = false;
@@ -909,7 +918,7 @@ ecat_transfer_result_t ecat_transfer_finish(
             /* 异步固件导入核验 expected_size */
             if ((t->total_size > 0U) && (t->current_offset != t->total_size)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                if (t->core != NULL) {
+                if (t->fw_backend_ctx != NULL) {
                     ldr_fw_fail_reason_t reason = (t->current_offset < t->total_size)
                         ? LDR_FW_FAIL_UNDER_RECEIVE
                         : LDR_FW_FAIL_OVER_RECEIVE;
@@ -995,7 +1004,7 @@ ecat_transfer_result_t ecat_transfer_finish(
         if (t->target->type == ECAT_TARGET_TYPE_FIRMWARE) {
             if ((t->total_size > 0U) && (t->current_offset != t->total_size)) {
                 t->last_error = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-                if (t->core != NULL) {
+                if (t->fw_backend_ctx != NULL) {
                     ldr_fw_fail_reason_t reason = (t->current_offset < t->total_size)
                         ? LDR_FW_FAIL_UNDER_RECEIVE
                         : LDR_FW_FAIL_OVER_RECEIVE;
@@ -1008,8 +1017,8 @@ ecat_transfer_result_t ecat_transfer_finish(
                 release_session(t, owner, token);
                 return ECAT_TRANSFER_FAILED;
             }
-            if ((t->core != NULL) && (t->fw_backend_ops != NULL) &&
-                (t->fw_backend_ops->on_end != NULL) && (t->fw_backend_ops->on_end(t->core) != 0)) {
+            if ((t->fw_backend_ctx != NULL) && (t->fw_backend_ops != NULL) &&
+                (t->fw_backend_ops->on_end != NULL) && (t->fw_backend_ops->on_end(t->fw_backend_ctx) != 0)) {
                 t->last_error = ECAT_TRANSFER_ERR_CORE_UPGRADE;
                 transfer_fail_firmware_core(t);
                 t->driver_initialized = false;

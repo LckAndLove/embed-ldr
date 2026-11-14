@@ -124,7 +124,7 @@ int ldr_loader_init(ldr_loader_t *loader);
  */
 int ldr_loader_bind_fw_backend(
     ldr_loader_t *loader,
-    struct ecat_foe_core *fw_core,
+    void *fw_ctx,
     const ldr_fw_backend_ops_t *ops,
     ecat_upgrade_session_t *shared_session);
 
