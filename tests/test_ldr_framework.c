@@ -137,8 +137,11 @@ typedef struct {
     uint32_t write_calls;
     uint32_t read_calls;
     uint32_t finalize_calls;
+    uint32_t finalize_floor_calls;
     uint32_t abort_calls;
+    uint32_t persisted_floor;
     bool inject_readback_corrupt;
+    bool inject_floor_commit_fail;
 } mock_flash_drv_t;
 
 static void mock_flash_reset_stats(mock_flash_drv_t *d)
@@ -149,8 +152,10 @@ static void mock_flash_reset_stats(mock_flash_drv_t *d)
     d->write_calls = 0U;
     d->read_calls = 0U;
     d->finalize_calls = 0U;
+    d->finalize_floor_calls = 0U;
     d->abort_calls = 0U;
     d->inject_readback_corrupt = false;
+    d->inject_floor_commit_fail = false;
 }
 
 static int drv_init(void *ctx)
@@ -223,6 +228,21 @@ static void drv_abort(void *ctx)
 {
     mock_flash_drv_t *d = (mock_flash_drv_t *)ctx;
     d->abort_calls++;
+}
+
+static int drv_finalize_with_floor(uint16_t target_id, uint32_t fw_version,
+                                   uint32_t min_allow_version, void *ctx)
+{
+    mock_flash_drv_t *d = (mock_flash_drv_t *)ctx;
+    (void)target_id;
+    d->finalize_floor_calls++;
+    if (d->inject_floor_commit_fail || (fw_version < d->persisted_floor)) {
+        return -1;
+    }
+    if (min_allow_version > d->persisted_floor) {
+        d->persisted_floor = min_allow_version;
+    }
+    return 0;
 }
 
 static int drv_read_open(void *ctx)
@@ -560,12 +580,250 @@ static void test_format_driven_firmware_pipeline_multiformat_and_security(void)
     printf("[TEST 5] 格式驱动刷写流水线安全负向校验 (0 驱动拦截/流 CRC/回读翻转/欠收/超收)... [PASS]\n");
 }
 
+/* -------------------------------------------------------------------------- */
+/*       TEST 6: 流水线可选流式验签 + 防回滚版本下限原子事务提交验证          */
+/* -------------------------------------------------------------------------- */
+
+typedef struct {
+    uint32_t running_crc;
+    uint32_t expected_sig_tag;
+    uint32_t begin_calls;
+    uint32_t update_calls;
+    uint32_t finish_calls;
+    uint32_t abort_calls;
+} mock_sig_ctx_t;
+
+static int mock_sig_begin(const uint8_t *key_id, size_t key_id_len,
+                          const uint8_t *signature, size_t signature_len, void *user_ctx)
+{
+    mock_sig_ctx_t *s = (mock_sig_ctx_t *)user_ctx;
+    s->begin_calls++;
+    if ((key_id == NULL) || (key_id_len != 8U) || (signature == NULL) || (signature_len != 64U)) {
+        return -1;
+    }
+    ldr_crc32_init(&s->running_crc);
+    s->expected_sig_tag = read_le32(signature);
+    return 0;
+}
+
+static int mock_sig_update(const uint8_t *data, size_t len, void *user_ctx)
+{
+    mock_sig_ctx_t *s = (mock_sig_ctx_t *)user_ctx;
+    s->update_calls++;
+    ldr_crc32_update(&s->running_crc, data, len);
+    return 0;
+}
+
+static int mock_sig_finish(void *user_ctx)
+{
+    mock_sig_ctx_t *s = (mock_sig_ctx_t *)user_ctx;
+    s->finish_calls++;
+    uint32_t actual = ldr_crc32_final(&s->running_crc);
+    return (actual == s->expected_sig_tag) ? 0 : -1;
+}
+
+static void mock_sig_abort(void *user_ctx)
+{
+    mock_sig_ctx_t *s = (mock_sig_ctx_t *)user_ctx;
+    s->abort_calls++;
+}
+
+typedef struct {
+    mock_flash_drv_t *drv;
+    bool inject_get_fail;
+} mock_floor_ctx_t;
+
+static int mock_get_floor(uint16_t target_id, uint32_t *out_floor, void *user_ctx)
+{
+    mock_floor_ctx_t *fc = (mock_floor_ctx_t *)user_ctx;
+    (void)target_id;
+    if ((fc == NULL) || fc->inject_get_fail) {
+        return -1;
+    }
+    *out_floor = fc->drv->persisted_floor;
+    return 0;
+}
+
+static void build_signed_efw_header(uint8_t out_hdr[ECAT_FOE_EFW_HEADER_MIN_LEN],
+                                    uint16_t target_id,
+                                    uint32_t fw_version,
+                                    uint32_t min_allow_version,
+                                    uint32_t payload_size,
+                                    uint32_t payload_crc32,
+                                    uint32_t sig_tag)
+{
+    (void)memset(out_hdr, 0, ECAT_FOE_EFW_HEADER_MIN_LEN);
+    write_le32(&out_hdr[0x00], ECAT_FOE_EFW_MAGIC);
+    write_le16(&out_hdr[0x04], ECAT_FOE_EFW_FORMAT_VERSION);
+    write_le16(&out_hdr[0x06], ECAT_FOE_EFW_HEADER_MIN_LEN);
+    write_le32(&out_hdr[0x08], 0x10010001U);
+    write_le32(&out_hdr[0x0C], 0x00000001U);
+    write_le16(&out_hdr[0x10], 1U);
+    write_le16(&out_hdr[0x12], 2U);
+    write_le16(&out_hdr[0x14], target_id);
+    write_le16(&out_hdr[0x16], 0U);
+    write_le32(&out_hdr[0x18], fw_version);
+    write_le32(&out_hdr[0x1C], min_allow_version);
+    write_le32(&out_hdr[0x20], payload_size);
+    write_le32(&out_hdr[0x24], payload_crc32);
+    out_hdr[60] = (uint8_t)'S';
+    out_hdr[61] = (uint8_t)'I';
+    out_hdr[62] = (uint8_t)'G';
+    out_hdr[63] = (uint8_t)'2';
+    write_le16(&out_hdr[64], 1U);
+    write_le16(&out_hdr[66], 1U);
+    write_le16(&out_hdr[68], ECAT_FOE_EFW_SIGNATURE_LEN);
+    write_le16(&out_hdr[70], ECAT_FOE_EFW_KEY_ID_LEN);
+    (void)memcpy(&out_hdr[72], "KEYID001", 8U);
+    write_le32(&out_hdr[80], sig_tag);
+    uint32_t hdr_crc = ecat_foe_crc32_calc(out_hdr, ECAT_FOE_EFW_HEADER_MIN_LEN - 4U);
+    write_le32(&out_hdr[ECAT_FOE_EFW_HEADER_MIN_LEN - 4U], hdr_crc);
+}
+
+static void test_pipeline_signature_and_anti_rollback(void)
+{
+    ldr_loader_t loader;
+    ldr_fw_pipeline_t pipe;
+    mock_flash_drv_t fw_drv;
+    mock_sig_ctx_t sig_ctx;
+    mock_floor_ctx_t floor_ctx;
+    ldr_transport_endpoint_t can_ep;
+    ldr_transport_plugin_desc_t ep_desc;
+    ldr_format_plugin_desc_t efw_desc;
+    uint8_t header_buf[256];
+    uint8_t residual_buf[32];
+    uint32_t i;
+
+    (void)memset(&fw_drv, 0, sizeof(fw_drv));
+    (void)memset(&sig_ctx, 0, sizeof(sig_ctx));
+    fw_drv.persisted_floor = 0x02000000U;
+    floor_ctx.drv = &fw_drv;
+    floor_ctx.inject_get_fail = false;
+
+    assert(ldr_loader_init(&loader) == 0);
+    assert(ldr_format_efw_make_plugin_desc(NULL, &efw_desc) == 0);
+    assert(ldr_loader_register_format(&loader, &efw_desc) == 0);
+    assert(ldr_fw_pipeline_init(&pipe, &loader, header_buf, sizeof(header_buf),
+                                residual_buf, sizeof(residual_buf)) == 0);
+
+    ldr_fw_security_cfg_t sec;
+    (void)memset(&sec, 0, sizeof(sec));
+    sec.require_signature = true;
+    sec.verifier.begin = mock_sig_begin;
+    sec.verifier.update = mock_sig_update;
+    sec.verifier.finish = mock_sig_finish;
+    sec.verifier.abort = mock_sig_abort;
+    sec.verifier.user_ctx = &sig_ctx;
+    sec.enable_anti_rollback = true;
+    sec.get_version_floor = mock_get_floor;
+    sec.anti_rollback_ctx = &floor_ctx;
+    assert(ldr_fw_pipeline_set_security(&pipe, &sec) == 0);
+
+    ldr_target_desc_t fw_target;
+    (void)memset(&fw_target, 0, sizeof(fw_target));
+    fw_target.target_id = 1U;
+    (void)strcpy(fw_target.name, "MCU_SEC");
+    fw_target.type = LDR_TARGET_TYPE_FIRMWARE;
+    fw_target.max_size = sizeof(fw_drv.storage);
+    fw_target.write_unit = 16U;
+    fw_target.permissions = LDR_PERM_RW;
+    fw_target.enabled = true;
+    fw_target.driver.io.init = drv_init;
+    fw_target.driver.io.invalidate = drv_invalidate;
+    fw_target.driver.io.erase_to = drv_erase_to;
+    fw_target.driver.io.write = drv_write;
+    fw_target.driver.io.read = drv_read;
+    fw_target.driver.io.finalize = drv_finalize;
+    fw_target.driver.io.abort = drv_abort;
+    fw_target.driver.io.finalize_with_version_floor = drv_finalize_with_floor;
+    fw_target.user_ctx = &fw_drv;
+    assert(ldr_loader_register_target(&loader, &fw_target) == 0);
+
+    assert(ldr_transport_endpoint_init(&can_ep, LDR_TRANSPORT_ID_CAN, "CAN_SEC",
+                                       ldr_loader_get_transfer(&loader), NULL) == 0);
+    assert(ldr_transport_endpoint_make_plugin_desc(&can_ep, LDR_TRANSPORT_CAP_BIDIRECTIONAL, &ep_desc) == 0);
+    assert(ldr_loader_register_transport(&loader, &ep_desc) == 0);
+
+    uint8_t payload[48];
+    for (i = 0U; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)(0x40U + i);
+    }
+    uint32_t payload_crc = ldr_crc32_calc(payload, sizeof(payload));
+    uint8_t img[ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(payload)];
+    (void)memcpy(&img[ECAT_FOE_EFW_HEADER_MIN_LEN], payload, sizeof(payload));
+
+    /* 6A: 未签名镜像在强制验签模式下被拦截 (0 驱动调用) */
+    build_valid_efw_header(img, 1U, 0x02010000U, (uint32_t)sizeof(payload), payload_crc);
+    mock_flash_reset_stats(&fw_drv);
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 1U, (uint32_t)sizeof(img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, img, sizeof(img)) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_SIGNATURE_REQUIRED);
+    assert(fw_drv.init_calls == 0U);
+    assert(fw_drv.abort_calls == 0U);
+
+    /* 6B: 版本低于防回滚下限 (0x01090000 < 0x02000000) -> 0 驱动调用 */
+    build_signed_efw_header(img, 1U, 0x01090000U, 0x01090000U, (uint32_t)sizeof(payload), payload_crc, payload_crc);
+    mock_flash_reset_stats(&fw_drv);
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 1U, (uint32_t)sizeof(img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, img, sizeof(img)) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_ANTI_ROLLBACK_REJECTED);
+    assert(fw_drv.init_calls == 0U);
+
+    /* 6C: 防回滚下限查询失败 -> 0 驱动调用 */
+    floor_ctx.inject_get_fail = true;
+    build_signed_efw_header(img, 1U, 0x02050000U, 0x02020000U, (uint32_t)sizeof(payload), payload_crc, payload_crc);
+    mock_flash_reset_stats(&fw_drv);
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 1U, (uint32_t)sizeof(img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, img, sizeof(img)) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_ANTI_ROLLBACK_GET);
+    assert(fw_drv.init_calls == 0U);
+    floor_ctx.inject_get_fail = false;
+
+    /* 6D: 签名无效 (sig_tag 错误) -> finish 阶段拒绝, 单次 abort, 禁止提交 */
+    build_signed_efw_header(img, 1U, 0x02050000U, 0x02020000U, (uint32_t)sizeof(payload), payload_crc, payload_crc ^ 0xDEADU);
+    mock_flash_reset_stats(&fw_drv);
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 1U, (uint32_t)sizeof(img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, img, sizeof(img)) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&can_ep) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_SIGNATURE_INVALID);
+    assert(fw_drv.finalize_calls == 0U);
+    assert(fw_drv.finalize_floor_calls == 0U);
+    assert(fw_drv.abort_calls == 1U);
+    assert(fw_drv.persisted_floor == 0x02000000U);
+
+    /* 6E: 合法签名 + 防回滚原子事务提交成功并抬升版本下限 */
+    build_signed_efw_header(img, 1U, 0x02050000U, 0x02020000U, (uint32_t)sizeof(payload), payload_crc, payload_crc);
+    mock_flash_reset_stats(&fw_drv);
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 1U, (uint32_t)sizeof(img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, img, sizeof(img)) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&can_ep) == LDR_RES_COMPLETE);
+    assert(fw_drv.finalize_calls == 0U);
+    assert(fw_drv.finalize_floor_calls == 1U);
+    assert(fw_drv.abort_calls == 0U);
+    assert(fw_drv.persisted_floor == 0x02020000U);
+    assert(memcmp(fw_drv.storage, payload, sizeof(payload)) == 0);
+
+    /* 6F: 原子提交失败 -> 单次 abort 且不抬升版本下限 */
+    build_signed_efw_header(img, 1U, 0x03000000U, 0x02090000U, (uint32_t)sizeof(payload), payload_crc, payload_crc);
+    mock_flash_reset_stats(&fw_drv);
+    fw_drv.inject_floor_commit_fail = true;
+    assert(ldr_transport_endpoint_begin_import(&can_ep, 1U, (uint32_t)sizeof(img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&can_ep, img, sizeof(img)) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&can_ep) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT);
+    assert(fw_drv.abort_calls == 1U);
+    assert(fw_drv.persisted_floor == 0x02020000U);
+
+    printf("[TEST 6] 流水线可选流式验签与防回滚版本下限原子事务提交 (6 项安全路径)... [PASS]\n");
+}
+
 int main(void)
 {
     printf("=== 运行统一中性 ldr_ Loader 框架单元测试 ===\n");
     test_format_plugin_registry_and_autodetect();
     test_foe_free_unified_loader_bidirectional();
     test_format_driven_firmware_pipeline_multiformat_and_security();
+    test_pipeline_signature_and_anti_rollback();
     printf(">>> 统一中性 ldr_ Loader 框架单元测试全部通过！<<<\n");
     return 0;
 }

@@ -39,6 +39,9 @@ typedef enum {
     LDR_FORMAT_INVALID          /* 魔数归属本格式，但头部字段/校验非法 */
 } ldr_format_probe_result_t;
 
+#define LDR_FORMAT_KEY_ID_MAX_LEN     16U
+#define LDR_FORMAT_SIGNATURE_MAX_LEN  64U
+
 /* 解析后的中性固件元数据 */
 typedef struct {
     uint16_t format_id;         /* 命中的格式插件 ID */
@@ -49,6 +52,10 @@ typedef struct {
     uint32_t payload_size;      /* 有效负载长度 (字节) */
     uint32_t payload_crc32;     /* 有效负载 CRC32 (若格式提供) */
     bool     is_signed;         /* 是否包含数字签名 */
+    uint8_t  key_id[LDR_FORMAT_KEY_ID_MAX_LEN];       /* 签名密钥 ID (可选) */
+    uint8_t  key_id_len;                              /* 有效密钥 ID 长度 */
+    uint8_t  signature[LDR_FORMAT_SIGNATURE_MAX_LEN]; /* 数字签名原始字节 (可选) */
+    uint8_t  signature_len;                           /* 有效签名长度 */
 } ldr_format_metadata_t;
 
 /* 格式与安全插件操作虚表 */

@@ -1,6 +1,6 @@
 /**
  * @file ldr_fw_pipeline.c
- * @brief 格式插件驱动的中性固件刷写流水线实现 (零 FoE / 零 EFW 硬编码依赖)
+ * @brief 格式插件驱动的中性固件刷写流水线实现 (含可选流式验签与防回滚事务提交)
  */
 
 #define LDR_NEUTRAL_BUILD 1
@@ -30,6 +30,17 @@ static void reset_session_fields(ldr_fw_pipeline_t *pipe)
     pipe->driver_initialized = false;
     pipe->driver_aborted = false;
     pipe->driver_finalized = false;
+    pipe->signature_active = false;
+}
+
+static void abort_verifier_once(ldr_fw_pipeline_t *pipe)
+{
+    if ((pipe != NULL) && pipe->signature_active) {
+        if (pipe->security.verifier.abort != NULL) {
+            pipe->security.verifier.abort(pipe->security.verifier.user_ctx);
+        }
+        pipe->signature_active = false;
+    }
 }
 
 static void abort_driver_once(ldr_fw_pipeline_t *pipe)
@@ -37,6 +48,7 @@ static void abort_driver_once(ldr_fw_pipeline_t *pipe)
     if (pipe == NULL) {
         return;
     }
+    abort_verifier_once(pipe);
     if (pipe->driver_initialized && !pipe->driver_finalized && !pipe->driver_aborted) {
         if ((pipe->active_target != NULL) && (pipe->active_target->driver.io.abort != NULL)) {
             pipe->active_target->driver.io.abort(pipe->active_target->user_ctx);
@@ -142,7 +154,9 @@ static int pipe_begin_target(
         (target->driver.io.write == NULL) ||
         (target->driver.io.read == NULL) ||
         (target->driver.io.finalize == NULL) ||
-        (target->driver.io.abort == NULL)) {
+        (target->driver.io.abort == NULL) ||
+        (pipe->security.enable_anti_rollback &&
+         (target->driver.io.finalize_with_version_floor == NULL))) {
         pipe->last_error = LDR_FW_PIPE_ERR_TARGET_INVALID;
         if (out_err != NULL) {
             *out_err = ECAT_TRANSFER_ERR_DRIVER_WRITE;
@@ -156,6 +170,59 @@ static int pipe_begin_target(
     pipe->req_fw_version = fw_version;
     pipe->session_active = true;
     pipe->last_error = LDR_FW_PIPE_OK;
+    return 0;
+}
+
+static int pipe_precheck_security(ldr_fw_pipeline_t *pipe, const ldr_format_metadata_t *meta)
+{
+    /* 1. 防回滚版本下限预检 (触碰物理介质前全部完成) */
+    if (pipe->security.enable_anti_rollback) {
+        uint32_t current_floor = 0U;
+
+        if (meta->min_allow_version > meta->fw_version) {
+            pipe->last_error = LDR_FW_PIPE_ERR_ANTI_ROLLBACK_REJECTED;
+            return -1;
+        }
+        if ((pipe->security.get_version_floor == NULL) ||
+            (pipe->security.get_version_floor(
+                 pipe->req_target_id, &current_floor, pipe->security.anti_rollback_ctx) != 0)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_ANTI_ROLLBACK_GET;
+            return -1;
+        }
+        if (meta->fw_version < current_floor) {
+            pipe->last_error = LDR_FW_PIPE_ERR_ANTI_ROLLBACK_REJECTED;
+            return -1;
+        }
+    }
+
+    /* 2. 可选流式签名校验启动 (强制验签或带签名且已配置验签器) */
+    if (pipe->security.require_signature && !meta->is_signed) {
+        pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_REQUIRED;
+        return -1;
+    }
+
+    if (pipe->security.require_signature ||
+        (meta->is_signed && (pipe->security.verifier.begin != NULL))) {
+        if ((pipe->security.verifier.begin == NULL) ||
+            (pipe->security.verifier.update == NULL) ||
+            (pipe->security.verifier.finish == NULL) ||
+            (pipe->security.verifier.abort == NULL)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+            return -1;
+        }
+        if (pipe->security.verifier.begin(
+                meta->key_id,
+                (size_t)meta->key_id_len,
+                meta->signature,
+                (size_t)meta->signature_len,
+                pipe->security.verifier.user_ctx) != 0) {
+            pipe->security.verifier.abort(pipe->security.verifier.user_ctx);
+            pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+            return -1;
+        }
+        pipe->signature_active = true;
+    }
+
     return 0;
 }
 
@@ -251,8 +318,17 @@ static int pipe_on_data(
             return -1;
         }
 
-        /* 头部与元数据全量核验通过，开始物理驱动生命周期 */
+        /* 防回滚与签名启动预检 (全部在驱动 init 之前完成，拒绝时不产生任何物理副作用) */
+        if (pipe_precheck_security(pipe, &parsed_meta) != 0) {
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            }
+            return -1;
+        }
+
+        /* 头部与安全预检全部通过，开始物理驱动生命周期 */
         if (target->driver.io.init(target->user_ctx) != 0) {
+            abort_verifier_once(pipe);
             pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INIT;
             if (out_err != NULL) {
                 *out_err = ECAT_TRANSFER_ERR_DRIVER_INIT;
@@ -289,6 +365,17 @@ static int pipe_on_data(
             *out_err = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
         }
         return -1;
+    }
+
+    if (pipe->signature_active) {
+        if (pipe->security.verifier.update(
+                cursor, (size_t)remaining, pipe->security.verifier.user_ctx) != 0) {
+            pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            }
+            return -1;
+        }
     }
 
     ldr_crc32_update(&pipe->stream_crc32, cursor, (size_t)remaining);
@@ -373,9 +460,31 @@ static int pipe_on_end(void *fw_ctx)
         return -1;
     }
 
-    if (target->driver.io.finalize(target->user_ctx) != 0) {
-        pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
-        return -1;
+    /* 流式签名终结校验 (全部数据与物理回读通过后执行，未通过严禁 finalize) */
+    if (pipe->signature_active) {
+        int vrc = pipe->security.verifier.finish(pipe->security.verifier.user_ctx);
+        pipe->signature_active = false;
+        if (vrc != 0) {
+            pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+            return -1;
+        }
+    }
+
+    /* 提交镜像: 开启防回滚时强制使用原子事务提交 finalize_with_version_floor */
+    if (pipe->security.enable_anti_rollback) {
+        if (target->driver.io.finalize_with_version_floor(
+                pipe->req_target_id,
+                pipe->meta.fw_version,
+                pipe->meta.min_allow_version,
+                target->user_ctx) != 0) {
+            pipe->last_error = LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT;
+            return -1;
+        }
+    } else {
+        if (target->driver.io.finalize(target->user_ctx) != 0) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+            return -1;
+        }
     }
 
     pipe->driver_finalized = true;
@@ -459,6 +568,36 @@ int ldr_fw_pipeline_init(
         return -1;
     }
 
+    return 0;
+}
+
+int ldr_fw_pipeline_set_security(
+    ldr_fw_pipeline_t *pipe,
+    const ldr_fw_security_cfg_t *cfg)
+{
+    if ((pipe == NULL) || !pipe->initialized || pipe->session_active) {
+        return -1;
+    }
+
+    if (cfg == NULL) {
+        (void)memset(&pipe->security, 0, sizeof(pipe->security));
+        return 0;
+    }
+
+    if (cfg->require_signature) {
+        if ((cfg->verifier.begin == NULL) ||
+            (cfg->verifier.update == NULL) ||
+            (cfg->verifier.finish == NULL) ||
+            (cfg->verifier.abort == NULL)) {
+            return -1;
+        }
+    }
+
+    if (cfg->enable_anti_rollback && (cfg->get_version_floor == NULL)) {
+        return -1;
+    }
+
+    pipe->security = *cfg;
     return 0;
 }
 
