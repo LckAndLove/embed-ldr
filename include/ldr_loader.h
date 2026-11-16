@@ -129,6 +129,14 @@ int ldr_loader_bind_fw_backend(
     ecat_upgrade_session_t *shared_session);
 
 /**
+ * @brief 向统一 Loader 框架绑定可选异步固件操作虚表
+ */
+int ldr_loader_bind_fw_async_ops(
+    ldr_loader_t *loader,
+    const ecat_upgrade_async_ops_t *ops,
+    void *async_ctx);
+
+/**
  * @brief 注册目标存储区块插件 (固件区 / 参数区 / 日志区 / 自定义介质)
  */
 int ldr_loader_register_target(

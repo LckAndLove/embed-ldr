@@ -250,10 +250,17 @@ int main(void)
     fw_async_desc.driver.fw_async_ops = &bad_fw_async_ops;
     assert(ecat_target_registry_add(&reg, &fw_async_desc) == -5);
 
-    /* 固件目标仅配置 async_ops 而未配置 fw_async_ops 时，不能误判为合法异步写入并放行 */
+    /* 固件目标配置完整统一中性 async_ops (供 ldr_fw_pipeline_t 非阻塞刷写) 时允许注册；
+       若 async_ops 不完整则必须拦截 (-5) */
     fw_async_desc.driver.fw_async_ops = NULL;
-    fw_async_desc.driver.async_ops = &good_ops;
+    fw_async_desc.driver.async_ops = &missing_abort_ops;
     assert(ecat_target_registry_add(&reg, &fw_async_desc) == -5);
+
+    ecat_target_desc_t fw_neutral_async = fw_async_desc;
+    fw_neutral_async.target_id = 65534U;
+    (void)strncpy(fw_neutral_async.name, "ext_fw_ldr", sizeof(fw_neutral_async.name));
+    fw_neutral_async.driver.async_ops = &good_ops;
+    assert(ecat_target_registry_add(&reg, &fw_neutral_async) == 0);
     fw_async_desc.driver.async_ops = NULL;
 
     static const ecat_foe_target_async_ops_t good_fw_async_ops = {
@@ -269,7 +276,7 @@ int main(void)
 
     size_t high_slot = 0U;
     const ecat_target_desc_t *found_high = ecat_target_registry_find_slot_by_id(&reg, 65535U, &high_slot);
-    assert(found_high != NULL && high_slot == 4U);
+    assert(found_high != NULL && high_slot == 5U);
     assert(found_high->driver.fw_async_ops == &good_fw_async_ops);
     assert(found_high->driver.fw_async_user_ctx == &dummy_async_ctx);
     assert(found_high->async_safe_session_abort == true);

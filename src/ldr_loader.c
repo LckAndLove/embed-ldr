@@ -44,6 +44,17 @@ int ldr_loader_bind_fw_backend(
     return ecat_transfer_bind_fw_backend(&loader->transfer, fw_ctx, ops, shared_session);
 }
 
+int ldr_loader_bind_fw_async_ops(
+    ldr_loader_t *loader,
+    const ecat_upgrade_async_ops_t *ops,
+    void *async_ctx)
+{
+    if ((loader == NULL) || !loader->initialized) {
+        return -1;
+    }
+    return ecat_transfer_bind_fw_async_ops(&loader->transfer, ops, async_ctx);
+}
+
 int ldr_loader_register_target(
     ldr_loader_t *loader,
     const ldr_target_desc_t *desc)

@@ -194,6 +194,15 @@ int ecat_transfer_bind_fw_backend(
     const ldr_fw_backend_ops_t *ops,
     ecat_upgrade_session_t *shared_session);
 
+/**
+ * @brief 向传输管理器绑定可选的异步固件操作虚表 (供中性异步固件流水线使用)
+ * @return 0 成功，-1 参数非法或当前有活跃会话
+ */
+int ecat_transfer_bind_fw_async_ops(
+    ecat_transfer_t *t,
+    const ecat_upgrade_async_ops_t *ops,
+    void *async_ctx);
+
 int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, struct ecat_foe_core *core);
 
 /**

@@ -1,17 +1,19 @@
 /**
  * @file ldr_fw_pipeline.h
- * @brief 格式插件驱动的中性固件刷写流水线 (Format-Driven Firmware Upgrade Pipeline)
+ * @brief 格式插件驱动的中性固件刷写流水线 (同步 + 非阻塞异步, 零 FoE 依赖)
  *
  * 设计原则 (BARR-C:2018 / MISRA-C 友好, C99 零动态分配, 零 FoE 依赖):
  * 1. 多格式统一驱动: 通过 ldr_format_registry_t 自动探测并校验镜像头 (EFW / 自定义格式)，
  *    无需硬编码任何特定容器格式。
- * 2. 可选安全增强: 支持注入流式签名校验器 (如 Ed25519ph) 与防回滚版本下限事务提交
+ * 2. 同步与非阻塞异步双模式:
+ *    - 同步目标 (asynchronous == false): 通过 target->driver.io.* 同步刷写；
+ *    - 异步目标 (asynchronous == true): 通过 target->driver.async_ops 非阻塞推进，
+ *      由主循环 ldr_loader_poll() 统一驱动 INIT -> INVALIDATE -> ERASE -> WRITE -> READBACK -> FINALIZE。
+ * 3. 可选安全增强: 支持注入流式签名校验器 (如 Ed25519ph) 与防回滚版本下限事务提交
  *    (get_version_floor + finalize_with_version_floor)，所有策略预检均在触碰驱动前完成。
- * 3. 强防变砖契约: 头部、签名启动与防回滚预检通过前 0 次驱动调用；通过后严格执行
- *    init -> invalidate -> 按需 erase_to + write_unit 对齐写 (尾块 0xFF 补齐)
- *    -> 流 CRC32 与物理回读 CRC32 双重核验 -> 验签 finish -> finalize/防回滚事务提交；
- *    任何异常至多调用一次 abort() 并安全中止验签器。
- * 4. 零动态分配: 头部缓冲与写入对齐缓冲全部由调用方静态提供。
+ * 4. 强防变砖契约: 头部、签名启动与防回滚预检通过前 0 次驱动调用；任何异常至多调用一次 abort()
+ *    并安全清理验签器状态。
+ * 5. 零动态分配: 头部缓冲与写入对齐缓冲全部由调用方静态提供。
  */
 
 #ifndef LDR_FW_PIPELINE_H
@@ -25,6 +27,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define LDR_FW_PIPE_READBACK_CHUNK_LEN 64U
 
 typedef enum {
     LDR_FW_PIPE_OK = 0,
@@ -51,6 +55,16 @@ typedef enum {
     LDR_FW_PIPE_ERR_ANTI_ROLLBACK_REJECTED,
     LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT
 } ldr_fw_pipeline_err_t;
+
+typedef enum {
+    LDR_FW_ASYNC_PHASE_NONE = 0,
+    LDR_FW_ASYNC_PHASE_INIT,
+    LDR_FW_ASYNC_PHASE_INVALIDATE,
+    LDR_FW_ASYNC_PHASE_ERASE,
+    LDR_FW_ASYNC_PHASE_WRITE,
+    LDR_FW_ASYNC_PHASE_READBACK,
+    LDR_FW_ASYNC_PHASE_FINALIZE
+} ldr_fw_async_phase_t;
 
 /* 中性流式数字签名校验器接口 (如 Ed25519ph / ECDSA / HMAC) */
 typedef struct {
@@ -109,11 +123,24 @@ typedef struct {
     bool driver_aborted;
     bool driver_finalized;
     bool signature_active;
+
+    /* 非阻塞异步刷写状态机字段 */
+    bool is_async;
+    ldr_fw_async_phase_t async_phase;
+    ecat_async_data_op_t async_op;
+    const uint8_t *async_chunk_ptr;
+    size_t async_chunk_rem;
+    bool async_ending;
+    bool async_readback_started;
+    uint32_t async_readback_offset;
+    uint32_t async_readback_crc32;
+    uint8_t async_readback_buf[LDR_FW_PIPE_READBACK_CHUNK_LEN];
+
     ldr_fw_pipeline_err_t last_error;
 } ldr_fw_pipeline_t;
 
 /**
- * @brief 初始化格式插件驱动的固件刷写流水线并自动绑定到统一 Loader 框架
+ * @brief 初始化格式插件驱动的固件刷写流水线 (同时绑定同步与异步后端虚表)
  */
 int ldr_fw_pipeline_init(
     ldr_fw_pipeline_t *pipe,
@@ -125,8 +152,6 @@ int ldr_fw_pipeline_init(
 
 /**
  * @brief 配置可选安全策略 (流式签名校验与防回滚版本下限事务提交)
- * @note 活跃刷写会话期间严禁修改安全策略；传 NULL 可重置为默认关闭。
- * @return 0 成功，-1 参数非法或当前有活跃会话
  */
 int ldr_fw_pipeline_set_security(
     ldr_fw_pipeline_t *pipe,

@@ -1,6 +1,6 @@
 /**
  * @file ldr_fw_pipeline.c
- * @brief 格式插件驱动的中性固件刷写流水线实现 (含可选流式验签与防回滚事务提交)
+ * @brief 格式插件驱动的中性固件刷写流水线实现 (同步 + 非阻塞异步 + 验签 + 防回滚)
  */
 
 #define LDR_NEUTRAL_BUILD 1
@@ -8,9 +8,10 @@
 #include "ldr_crc32.h"
 #include <string.h>
 
-#define LDR_FW_PIPE_READBACK_CHUNK_LEN 64U
-#define LDR_FW_PIPE_HEADER_MIN_LEN     4U
-#define LDR_FW_PIPE_HEADER_MAX_LEN     512U
+#define LDR_FW_PIPE_HEADER_MIN_LEN 4U
+#define LDR_FW_PIPE_HEADER_MAX_LEN 512U
+
+static const ecat_upgrade_async_ops_t s_ldr_fw_pipeline_async_ops;
 
 static void reset_session_fields(ldr_fw_pipeline_t *pipe)
 {
@@ -31,6 +32,15 @@ static void reset_session_fields(ldr_fw_pipeline_t *pipe)
     pipe->driver_aborted = false;
     pipe->driver_finalized = false;
     pipe->signature_active = false;
+    pipe->is_async = false;
+    pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+    (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+    pipe->async_chunk_ptr = NULL;
+    pipe->async_chunk_rem = 0U;
+    pipe->async_ending = false;
+    pipe->async_readback_started = false;
+    pipe->async_readback_offset = 0U;
+    pipe->async_readback_crc32 = 0U;
 }
 
 static void abort_verifier_once(ldr_fw_pipeline_t *pipe)
@@ -50,15 +60,26 @@ static void abort_driver_once(ldr_fw_pipeline_t *pipe)
     }
     abort_verifier_once(pipe);
     if (pipe->driver_initialized && !pipe->driver_finalized && !pipe->driver_aborted) {
-        if ((pipe->active_target != NULL) && (pipe->active_target->driver.io.abort != NULL)) {
-            pipe->active_target->driver.io.abort(pipe->active_target->user_ctx);
+        if (pipe->active_target != NULL) {
+            if (pipe->is_async) {
+                if ((pipe->active_target->driver.async_ops != NULL) &&
+                    (pipe->active_target->driver.async_ops->abort != NULL)) {
+                    pipe->active_target->driver.async_ops->abort(pipe->active_target->user_ctx);
+                }
+            } else if (pipe->active_target->driver.io.abort != NULL) {
+                pipe->active_target->driver.io.abort(pipe->active_target->user_ctx);
+            }
         }
         pipe->driver_aborted = true;
     }
+    pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+    pipe->async_chunk_ptr = NULL;
+    pipe->async_chunk_rem = 0U;
+    pipe->async_ending = false;
     pipe->session_active = false;
 }
 
-static int flush_aligned_block(ldr_fw_pipeline_t *pipe, const ldr_target_desc_t *target)
+static int flush_aligned_block_sync(ldr_fw_pipeline_t *pipe, const ldr_target_desc_t *target)
 {
     uint32_t write_unit = target->write_unit;
     uint32_t need_end;
@@ -94,88 +115,8 @@ static int flush_aligned_block(ldr_fw_pipeline_t *pipe, const ldr_target_desc_t 
     return 0;
 }
 
-static bool pipe_is_binding_valid(
-    const void *fw_ctx,
-    const ecat_target_registry_t *reg,
-    const void *shared_session)
-{
-    const ldr_fw_pipeline_t *pipe = (const ldr_fw_pipeline_t *)fw_ctx;
-    (void)shared_session;
-    if (pipe == NULL) {
-        return false;
-    }
-    return pipe->initialized && (pipe->targets == reg) && (pipe->formats != NULL);
-}
-
-static bool pipe_is_busy(const void *fw_ctx)
-{
-    const ldr_fw_pipeline_t *pipe = (const ldr_fw_pipeline_t *)fw_ctx;
-    if (pipe == NULL) {
-        return false;
-    }
-    return pipe->session_active;
-}
-
-static bool pipe_validate_async_binding(
-    const void *fw_ctx,
-    const ecat_upgrade_async_ops_t *async_ops,
-    const void *async_ctx)
-{
-    (void)fw_ctx;
-    (void)async_ops;
-    (void)async_ctx;
-    return false;
-}
-
-static int pipe_begin_target(
-    void *fw_ctx,
-    const ecat_target_desc_t *target,
-    uint16_t target_id,
-    uint32_t fw_version,
-    ecat_transfer_err_t *out_err)
-{
-    ldr_fw_pipeline_t *pipe = (ldr_fw_pipeline_t *)fw_ctx;
-
-    if ((pipe == NULL) || !pipe->initialized || (target == NULL)) {
-        if (out_err != NULL) {
-            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-        }
-        return -1;
-    }
-
-    if ((target->type != LDR_TARGET_TYPE_FIRMWARE) ||
-        target->asynchronous ||
-        (target->max_size == 0U) ||
-        (target->write_unit == 0U) ||
-        ((size_t)target->write_unit > pipe->residual_cap) ||
-        (target->driver.io.init == NULL) ||
-        (target->driver.io.invalidate == NULL) ||
-        (target->driver.io.erase_to == NULL) ||
-        (target->driver.io.write == NULL) ||
-        (target->driver.io.read == NULL) ||
-        (target->driver.io.finalize == NULL) ||
-        (target->driver.io.abort == NULL) ||
-        (pipe->security.enable_anti_rollback &&
-         (target->driver.io.finalize_with_version_floor == NULL))) {
-        pipe->last_error = LDR_FW_PIPE_ERR_TARGET_INVALID;
-        if (out_err != NULL) {
-            *out_err = ECAT_TRANSFER_ERR_DRIVER_WRITE;
-        }
-        return -1;
-    }
-
-    reset_session_fields(pipe);
-    pipe->active_target = target;
-    pipe->req_target_id = target_id;
-    pipe->req_fw_version = fw_version;
-    pipe->session_active = true;
-    pipe->last_error = LDR_FW_PIPE_OK;
-    return 0;
-}
-
 static int pipe_precheck_security(ldr_fw_pipeline_t *pipe, const ldr_format_metadata_t *meta)
 {
-    /* 1. 防回滚版本下限预检 (触碰物理介质前全部完成) */
     if (pipe->security.enable_anti_rollback) {
         uint32_t current_floor = 0U;
 
@@ -195,7 +136,6 @@ static int pipe_precheck_security(ldr_fw_pipeline_t *pipe, const ldr_format_meta
         }
     }
 
-    /* 2. 可选流式签名校验启动 (强制验签或带签名且已配置验签器) */
     if (pipe->security.require_signature && !meta->is_signed) {
         pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_REQUIRED;
         return -1;
@@ -226,6 +166,203 @@ static int pipe_precheck_security(ldr_fw_pipeline_t *pipe, const ldr_format_meta
     return 0;
 }
 
+/* 公共头部装配与元数据/安全预检: 返回 1 表示头部已就绪，0 表示 NEED_MORE，-1 表示失败 */
+static int pipe_consume_header_chunk(
+    ldr_fw_pipeline_t *pipe,
+    const ldr_target_desc_t *target,
+    const uint8_t **io_cursor,
+    size_t *io_remaining,
+    ecat_transfer_err_t *out_err)
+{
+    size_t prev_hdr_len = pipe->header_rx_len;
+    size_t space_left = pipe->header_cap - prev_hdr_len;
+    size_t to_copy = (*io_remaining < space_left) ? *io_remaining : space_left;
+    uint16_t detected_hdr_len = 0U;
+    ldr_format_metadata_t parsed_meta;
+    ldr_format_probe_result_t pres;
+
+    if (to_copy > 0U) {
+        (void)memcpy(&pipe->header_buf[prev_hdr_len], *io_cursor, to_copy);
+        pipe->header_rx_len = prev_hdr_len + to_copy;
+    }
+
+    (void)memset(&parsed_meta, 0, sizeof(parsed_meta));
+    pres = ldr_format_registry_probe_and_parse(
+        pipe->formats, pipe->header_buf, pipe->header_rx_len,
+        &detected_hdr_len, &parsed_meta);
+
+    if (pres == LDR_FORMAT_NEED_MORE) {
+        if (((detected_hdr_len > 0U) && ((size_t)detected_hdr_len > pipe->header_cap)) ||
+            (pipe->header_rx_len >= pipe->header_cap)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_HEADER_TOO_LARGE;
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            }
+            return -1;
+        }
+        pipe->expected_header_len = detected_hdr_len;
+        *io_cursor += to_copy;
+        *io_remaining -= to_copy;
+        return 0;
+    }
+
+    if (pres != LDR_FORMAT_MATCH) {
+        pipe->last_error = LDR_FW_PIPE_ERR_FORMAT_REJECTED;
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if ((parsed_meta.header_size == 0U) ||
+        ((size_t)parsed_meta.header_size > pipe->header_rx_len) ||
+        ((size_t)parsed_meta.header_size < prev_hdr_len)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_FORMAT_REJECTED;
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if ((parsed_meta.target_id != 0U) && (parsed_meta.target_id != pipe->req_target_id)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_TARGET_MISMATCH;
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if ((pipe->req_fw_version != 0U) && (parsed_meta.fw_version != pipe->req_fw_version)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_VERSION_MISMATCH;
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if ((parsed_meta.payload_size == 0U) || (parsed_meta.payload_size > target->max_size)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_PAYLOAD_LIMIT;
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
+        }
+        return -1;
+    }
+
+    if (pipe_precheck_security(pipe, &parsed_meta) != 0) {
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    pipe->meta = parsed_meta;
+    size_t consumed = (size_t)parsed_meta.header_size - prev_hdr_len;
+    *io_cursor += consumed;
+    *io_remaining -= consumed;
+    return 1;
+}
+
+static bool pipe_is_binding_valid(
+    const void *fw_ctx,
+    const ecat_target_registry_t *reg,
+    const void *shared_session)
+{
+    const ldr_fw_pipeline_t *pipe = (const ldr_fw_pipeline_t *)fw_ctx;
+    (void)shared_session;
+    if (pipe == NULL) {
+        return false;
+    }
+    return pipe->initialized && (pipe->targets == reg) && (pipe->formats != NULL);
+}
+
+static bool pipe_is_busy(const void *fw_ctx)
+{
+    const ldr_fw_pipeline_t *pipe = (const ldr_fw_pipeline_t *)fw_ctx;
+    if (pipe == NULL) {
+        return false;
+    }
+    return pipe->session_active;
+}
+
+static bool pipe_validate_async_binding(
+    const void *fw_ctx,
+    const ecat_upgrade_async_ops_t *async_ops,
+    const void *async_ctx)
+{
+    const ldr_fw_pipeline_t *pipe = (const ldr_fw_pipeline_t *)fw_ctx;
+    if ((pipe == NULL) || !pipe->initialized) {
+        return false;
+    }
+    return (async_ops == &s_ldr_fw_pipeline_async_ops) && (async_ctx == pipe);
+}
+
+static int pipe_begin_target(
+    void *fw_ctx,
+    const ecat_target_desc_t *target,
+    uint16_t target_id,
+    uint32_t fw_version,
+    ecat_transfer_err_t *out_err)
+{
+    ldr_fw_pipeline_t *pipe = (ldr_fw_pipeline_t *)fw_ctx;
+
+    if ((pipe == NULL) || !pipe->initialized || (target == NULL)) {
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+        }
+        return -1;
+    }
+
+    if ((target->type != LDR_TARGET_TYPE_FIRMWARE) ||
+        (target->max_size == 0U) ||
+        (target->write_unit == 0U) ||
+        ((size_t)target->write_unit > pipe->residual_cap)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_TARGET_INVALID;
+        if (out_err != NULL) {
+            *out_err = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+        }
+        return -1;
+    }
+
+    if (target->asynchronous) {
+        if (pipe->security.enable_anti_rollback ||
+            (target->driver.async_ops == NULL) ||
+            (target->driver.async_ops->start == NULL) ||
+            (target->driver.async_ops->poll == NULL) ||
+            (target->driver.async_ops->abort == NULL)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_TARGET_INVALID;
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            }
+            return -1;
+        }
+    } else {
+        if ((target->driver.io.init == NULL) ||
+            (target->driver.io.invalidate == NULL) ||
+            (target->driver.io.erase_to == NULL) ||
+            (target->driver.io.write == NULL) ||
+            (target->driver.io.read == NULL) ||
+            (target->driver.io.finalize == NULL) ||
+            (target->driver.io.abort == NULL) ||
+            (pipe->security.enable_anti_rollback &&
+             (target->driver.io.finalize_with_version_floor == NULL))) {
+            pipe->last_error = LDR_FW_PIPE_ERR_TARGET_INVALID;
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_DRIVER_WRITE;
+            }
+            return -1;
+        }
+    }
+
+    reset_session_fields(pipe);
+    pipe->active_target = target;
+    pipe->req_target_id = target_id;
+    pipe->req_fw_version = fw_version;
+    pipe->is_async = target->asynchronous;
+    pipe->session_active = true;
+    pipe->last_error = LDR_FW_PIPE_OK;
+    return 0;
+}
+
 static int pipe_on_data(
     void *fw_ctx,
     const ecat_target_desc_t *target,
@@ -235,9 +372,9 @@ static int pipe_on_data(
 {
     ldr_fw_pipeline_t *pipe = (ldr_fw_pipeline_t *)fw_ctx;
     const uint8_t *cursor = data;
-    uint32_t remaining = len;
+    size_t remaining = (size_t)len;
 
-    if ((pipe == NULL) || !pipe->session_active || (target == NULL) ||
+    if ((pipe == NULL) || !pipe->session_active || pipe->is_async || (target == NULL) ||
         (pipe->active_target != target) || ((remaining > 0U) && (cursor == NULL))) {
         if (out_err != NULL) {
             *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
@@ -246,87 +383,14 @@ static int pipe_on_data(
     }
 
     if (!pipe->header_complete) {
-        size_t prev_hdr_len = pipe->header_rx_len;
-        size_t space_left = pipe->header_cap - prev_hdr_len;
-        size_t to_copy = ((size_t)remaining < space_left) ? (size_t)remaining : space_left;
-        uint16_t detected_hdr_len = 0U;
-        ldr_format_metadata_t parsed_meta;
-        ldr_format_probe_result_t pres;
-
-        if (to_copy > 0U) {
-            (void)memcpy(&pipe->header_buf[prev_hdr_len], cursor, to_copy);
-            pipe->header_rx_len = prev_hdr_len + to_copy;
+        int hrc = pipe_consume_header_chunk(pipe, target, &cursor, &remaining, out_err);
+        if (hrc < 0) {
+            return -1;
         }
-
-        (void)memset(&parsed_meta, 0, sizeof(parsed_meta));
-        pres = ldr_format_registry_probe_and_parse(
-            pipe->formats, pipe->header_buf, pipe->header_rx_len,
-            &detected_hdr_len, &parsed_meta);
-
-        if (pres == LDR_FORMAT_NEED_MORE) {
-            if (((detected_hdr_len > 0U) && ((size_t)detected_hdr_len > pipe->header_cap)) ||
-                (pipe->header_rx_len >= pipe->header_cap)) {
-                pipe->last_error = LDR_FW_PIPE_ERR_HEADER_TOO_LARGE;
-                if (out_err != NULL) {
-                    *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-                }
-                return -1;
-            }
-            pipe->expected_header_len = detected_hdr_len;
+        if (hrc == 0) {
             return 0;
         }
 
-        if (pres != LDR_FORMAT_MATCH) {
-            pipe->last_error = LDR_FW_PIPE_ERR_FORMAT_REJECTED;
-            if (out_err != NULL) {
-                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            }
-            return -1;
-        }
-
-        if ((parsed_meta.header_size == 0U) ||
-            ((size_t)parsed_meta.header_size > pipe->header_rx_len) ||
-            ((size_t)parsed_meta.header_size < prev_hdr_len)) {
-            pipe->last_error = LDR_FW_PIPE_ERR_FORMAT_REJECTED;
-            if (out_err != NULL) {
-                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            }
-            return -1;
-        }
-
-        if ((parsed_meta.target_id != 0U) && (parsed_meta.target_id != pipe->req_target_id)) {
-            pipe->last_error = LDR_FW_PIPE_ERR_TARGET_MISMATCH;
-            if (out_err != NULL) {
-                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            }
-            return -1;
-        }
-
-        if ((pipe->req_fw_version != 0U) && (parsed_meta.fw_version != pipe->req_fw_version)) {
-            pipe->last_error = LDR_FW_PIPE_ERR_VERSION_MISMATCH;
-            if (out_err != NULL) {
-                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            }
-            return -1;
-        }
-
-        if ((parsed_meta.payload_size == 0U) || (parsed_meta.payload_size > target->max_size)) {
-            pipe->last_error = LDR_FW_PIPE_ERR_PAYLOAD_LIMIT;
-            if (out_err != NULL) {
-                *out_err = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
-            }
-            return -1;
-        }
-
-        /* 防回滚与签名启动预检 (全部在驱动 init 之前完成，拒绝时不产生任何物理副作用) */
-        if (pipe_precheck_security(pipe, &parsed_meta) != 0) {
-            if (out_err != NULL) {
-                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
-            }
-            return -1;
-        }
-
-        /* 头部与安全预检全部通过，开始物理驱动生命周期 */
         if (target->driver.io.init(target->user_ctx) != 0) {
             abort_verifier_once(pipe);
             pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INIT;
@@ -345,21 +409,15 @@ static int pipe_on_data(
             return -1;
         }
 
-        pipe->meta = parsed_meta;
         pipe->header_complete = true;
         ldr_crc32_init(&pipe->stream_crc32);
-
-        /* 跳过本块中属于头部的字节，余下字节直接进入载荷刷写 */
-        size_t consumed = (size_t)parsed_meta.header_size - prev_hdr_len;
-        cursor += consumed;
-        remaining -= (uint32_t)consumed;
     }
 
     if (remaining == 0U) {
         return 0;
     }
 
-    if (remaining > (pipe->meta.payload_size - pipe->payload_rx_bytes)) {
+    if (remaining > (size_t)(pipe->meta.payload_size - pipe->payload_rx_bytes)) {
         pipe->last_error = LDR_FW_PIPE_ERR_OVER_RECEIVE;
         if (out_err != NULL) {
             *out_err = ECAT_TRANSFER_ERR_BOUNDARY_EXCEEDED;
@@ -369,7 +427,7 @@ static int pipe_on_data(
 
     if (pipe->signature_active) {
         if (pipe->security.verifier.update(
-                cursor, (size_t)remaining, pipe->security.verifier.user_ctx) != 0) {
+                cursor, remaining, pipe->security.verifier.user_ctx) != 0) {
             pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
             if (out_err != NULL) {
                 *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
@@ -378,21 +436,21 @@ static int pipe_on_data(
         }
     }
 
-    ldr_crc32_update(&pipe->stream_crc32, cursor, (size_t)remaining);
-    pipe->payload_rx_bytes += remaining;
+    ldr_crc32_update(&pipe->stream_crc32, cursor, remaining);
+    pipe->payload_rx_bytes += (uint32_t)remaining;
 
     while (remaining > 0U) {
         size_t unit = (size_t)target->write_unit;
         size_t need = unit - pipe->residual_len;
-        size_t take = ((size_t)remaining < need) ? (size_t)remaining : need;
+        size_t take = (remaining < need) ? remaining : need;
 
         (void)memcpy(&pipe->residual_buf[pipe->residual_len], cursor, take);
         pipe->residual_len += take;
         cursor += take;
-        remaining -= (uint32_t)take;
+        remaining -= take;
 
         if (pipe->residual_len == unit) {
-            if (flush_aligned_block(pipe, target) != 0) {
+            if (flush_aligned_block_sync(pipe, target) != 0) {
                 if (out_err != NULL) {
                     *out_err = (pipe->last_error == LDR_FW_PIPE_ERR_DRIVER_ERASE)
                         ? ECAT_TRANSFER_ERR_DRIVER_ERASE
@@ -415,7 +473,7 @@ static int pipe_on_end(void *fw_ctx)
     uint32_t offset = 0U;
     uint8_t rb_buf[LDR_FW_PIPE_READBACK_CHUNK_LEN];
 
-    if ((pipe == NULL) || !pipe->session_active || (pipe->active_target == NULL)) {
+    if ((pipe == NULL) || !pipe->session_active || pipe->is_async || (pipe->active_target == NULL)) {
         return -1;
     }
     target = pipe->active_target;
@@ -429,7 +487,7 @@ static int pipe_on_end(void *fw_ctx)
         size_t unit = (size_t)target->write_unit;
         (void)memset(&pipe->residual_buf[pipe->residual_len], 0xFF, unit - pipe->residual_len);
         pipe->residual_len = unit;
-        if (flush_aligned_block(pipe, target) != 0) {
+        if (flush_aligned_block_sync(pipe, target) != 0) {
             return -1;
         }
     }
@@ -440,7 +498,6 @@ static int pipe_on_end(void *fw_ctx)
         return -1;
     }
 
-    /* 物理介质回读 CRC32 二次核验 (仅覆盖有效载荷字节，不含尾块 0xFF 对齐填充) */
     ldr_crc32_init(&readback_crc);
     while (offset < pipe->meta.payload_size) {
         uint32_t left = pipe->meta.payload_size - offset;
@@ -460,7 +517,6 @@ static int pipe_on_end(void *fw_ctx)
         return -1;
     }
 
-    /* 流式签名终结校验 (全部数据与物理回读通过后执行，未通过严禁 finalize) */
     if (pipe->signature_active) {
         int vrc = pipe->security.verifier.finish(pipe->security.verifier.user_ctx);
         pipe->signature_active = false;
@@ -470,7 +526,6 @@ static int pipe_on_end(void *fw_ctx)
         }
     }
 
-    /* 提交镜像: 开启防回滚时强制使用原子事务提交 finalize_with_version_floor */
     if (pipe->security.enable_anti_rollback) {
         if (target->driver.io.finalize_with_version_floor(
                 pipe->req_target_id,
@@ -491,6 +546,419 @@ static int pipe_on_end(void *fw_ctx)
     pipe->session_active = false;
     return 0;
 }
+
+/* -------------------------------------------------------------------------- */
+/*                     非阻塞异步固件刷写状态机实现                           */
+/* -------------------------------------------------------------------------- */
+
+static ecat_upgrade_async_result_t pipe_async_start_write_block(
+    ldr_fw_pipeline_t *pipe,
+    const ldr_target_desc_t *target)
+{
+    uint32_t write_unit = target->write_unit;
+    ecat_async_op_result_t ares;
+
+    (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+    pipe->async_op.kind = ECAT_ASYNC_DATA_OP_WRITE;
+    pipe->async_op.offset = pipe->written_offset;
+    pipe->async_op.length = write_unit;
+    pipe->async_op.buffer = pipe->residual_buf;
+
+    ares = target->driver.async_ops->start(target->user_ctx, &pipe->async_op);
+    if (ares == ECAT_ASYNC_OP_PENDING) {
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_WRITE;
+        return ECAT_UPGRADE_ASYNC_PENDING;
+    }
+    if ((ares != ECAT_ASYNC_OP_COMPLETE) || (pipe->async_op.actual_length != (size_t)write_unit)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
+        abort_driver_once(pipe);
+        return ECAT_UPGRADE_ASYNC_FAILED;
+    }
+    pipe->written_offset += write_unit;
+    pipe->residual_len = 0U;
+    pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+    return ECAT_UPGRADE_ASYNC_COMPLETE;
+}
+
+static ecat_upgrade_async_result_t pipe_async_flush_residual(
+    ldr_fw_pipeline_t *pipe,
+    const ldr_target_desc_t *target)
+{
+    uint32_t write_unit = target->write_unit;
+    uint32_t need_end;
+
+    if (pipe->written_offset > (UINT32_MAX - write_unit)) {
+        pipe->last_error = LDR_FW_PIPE_ERR_PAYLOAD_LIMIT;
+        abort_driver_once(pipe);
+        return ECAT_UPGRADE_ASYNC_FAILED;
+    }
+
+    need_end = pipe->written_offset + write_unit;
+    if (need_end > pipe->erased_watermark) {
+        ecat_async_op_result_t eres;
+        (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_ERASE_TO;
+        pipe->async_op.need_end = need_end;
+        eres = target->driver.async_ops->start(target->user_ctx, &pipe->async_op);
+        if (eres == ECAT_ASYNC_OP_PENDING) {
+            pipe->async_phase = LDR_FW_ASYNC_PHASE_ERASE;
+            return ECAT_UPGRADE_ASYNC_PENDING;
+        }
+        if ((eres != ECAT_ASYNC_OP_COMPLETE) || (pipe->async_op.erased_end < need_end)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
+            abort_driver_once(pipe);
+            return ECAT_UPGRADE_ASYNC_FAILED;
+        }
+        pipe->erased_watermark = pipe->async_op.erased_end;
+    }
+
+    return pipe_async_start_write_block(pipe, target);
+}
+
+static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
+{
+    const ldr_target_desc_t *target = pipe->active_target;
+    const ecat_async_data_ops_t *aops = target->driver.async_ops;
+
+    for (;;) {
+        if (pipe->async_phase != LDR_FW_ASYNC_PHASE_NONE) {
+            ecat_async_op_result_t pres = aops->poll(target->user_ctx, &pipe->async_op);
+            if (pres == ECAT_ASYNC_OP_PENDING) {
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            }
+            if (pres != ECAT_ASYNC_OP_COMPLETE) {
+                switch (pipe->async_phase) {
+                case LDR_FW_ASYNC_PHASE_INIT:
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INIT;
+                    break;
+                case LDR_FW_ASYNC_PHASE_INVALIDATE:
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
+                    break;
+                case LDR_FW_ASYNC_PHASE_ERASE:
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
+                    break;
+                case LDR_FW_ASYNC_PHASE_READBACK:
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
+                    break;
+                case LDR_FW_ASYNC_PHASE_FINALIZE:
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+                    break;
+                case LDR_FW_ASYNC_PHASE_WRITE:
+                default:
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
+                    break;
+                }
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+
+            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_INIT) {
+                ecat_async_op_result_t ires;
+                pipe->driver_initialized = true;
+                (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+                pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
+                ires = aops->start(target->user_ctx, &pipe->async_op);
+                if (ires == ECAT_ASYNC_OP_PENDING) {
+                    pipe->async_phase = LDR_FW_ASYNC_PHASE_INVALIDATE;
+                    return ECAT_UPGRADE_ASYNC_PENDING;
+                }
+                if (ires != ECAT_ASYNC_OP_COMPLETE) {
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
+                    abort_driver_once(pipe);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+                pipe->header_complete = true;
+                ldr_crc32_init(&pipe->stream_crc32);
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+                continue;
+            }
+
+            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_INVALIDATE) {
+                pipe->header_complete = true;
+                ldr_crc32_init(&pipe->stream_crc32);
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+                continue;
+            }
+
+            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_ERASE) {
+                uint32_t need_end = pipe->written_offset + target->write_unit;
+                if (pipe->async_op.erased_end < need_end) {
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
+                    abort_driver_once(pipe);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+                pipe->erased_watermark = pipe->async_op.erased_end;
+                ecat_upgrade_async_result_t wres = pipe_async_start_write_block(pipe, target);
+                if (wres != ECAT_UPGRADE_ASYNC_COMPLETE) {
+                    return wres;
+                }
+                continue;
+            }
+
+            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_WRITE) {
+                if (pipe->async_op.actual_length != (size_t)target->write_unit) {
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
+                    abort_driver_once(pipe);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+                pipe->written_offset += target->write_unit;
+                pipe->residual_len = 0U;
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+                continue;
+            }
+
+            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_READBACK) {
+                if (pipe->async_op.actual_length != (size_t)pipe->async_op.length) {
+                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
+                    abort_driver_once(pipe);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+                ldr_crc32_update(&pipe->async_readback_crc32,
+                                 pipe->async_readback_buf,
+                                 pipe->async_op.actual_length);
+                pipe->async_readback_offset += pipe->async_op.length;
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+                continue;
+            }
+
+            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_FINALIZE) {
+                pipe->driver_finalized = true;
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+                pipe->session_active = false;
+                return ECAT_UPGRADE_ASYNC_COMPLETE;
+            }
+        }
+
+        /* 1. 头部装配阶段 */
+        if (!pipe->header_complete) {
+            if (pipe->async_ending) {
+                pipe->last_error = LDR_FW_PIPE_ERR_UNDER_RECEIVE;
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+            if (pipe->async_chunk_rem == 0U) {
+                return ECAT_UPGRADE_ASYNC_COMPLETE;
+            }
+            int hrc = pipe_consume_header_chunk(
+                pipe, target, &pipe->async_chunk_ptr, &pipe->async_chunk_rem, NULL);
+            if (hrc < 0) {
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+            if (hrc == 0) {
+                return ECAT_UPGRADE_ASYNC_COMPLETE;
+            }
+
+            /* 异步启动 INIT */
+            ecat_async_op_result_t init_res;
+            (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+            pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INIT;
+            init_res = aops->start(target->user_ctx, &pipe->async_op);
+            if (init_res == ECAT_ASYNC_OP_PENDING) {
+                pipe->driver_initialized = true;
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_INIT;
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            }
+            if (init_res != ECAT_ASYNC_OP_COMPLETE) {
+                pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INIT;
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+            pipe->driver_initialized = true;
+
+            ecat_async_op_result_t inv_res;
+            (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+            pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
+            inv_res = aops->start(target->user_ctx, &pipe->async_op);
+            if (inv_res == ECAT_ASYNC_OP_PENDING) {
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_INVALIDATE;
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            }
+            if (inv_res != ECAT_ASYNC_OP_COMPLETE) {
+                pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+            pipe->header_complete = true;
+            ldr_crc32_init(&pipe->stream_crc32);
+            continue;
+        }
+
+        /* 2. 载荷流式接收与异步对齐写入 */
+        if (pipe->async_chunk_rem > 0U) {
+            if (pipe->async_chunk_rem > (size_t)(pipe->meta.payload_size - pipe->payload_rx_bytes)) {
+                pipe->last_error = LDR_FW_PIPE_ERR_OVER_RECEIVE;
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+
+            size_t unit = (size_t)target->write_unit;
+            size_t need = unit - pipe->residual_len;
+            size_t take = (pipe->async_chunk_rem < need) ? pipe->async_chunk_rem : need;
+
+            if (pipe->signature_active) {
+                if (pipe->security.verifier.update(
+                        pipe->async_chunk_ptr, take, pipe->security.verifier.user_ctx) != 0) {
+                    pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+                    abort_driver_once(pipe);
+                    return ECAT_UPGRADE_ASYNC_FAILED;
+                }
+            }
+            ldr_crc32_update(&pipe->stream_crc32, pipe->async_chunk_ptr, take);
+            pipe->payload_rx_bytes += (uint32_t)take;
+
+            (void)memcpy(&pipe->residual_buf[pipe->residual_len], pipe->async_chunk_ptr, take);
+            pipe->residual_len += take;
+            pipe->async_chunk_ptr += take;
+            pipe->async_chunk_rem -= take;
+
+            if (pipe->residual_len == unit) {
+                ecat_upgrade_async_result_t fres = pipe_async_flush_residual(pipe, target);
+                if (fres != ECAT_UPGRADE_ASYNC_COMPLETE) {
+                    return fres;
+                }
+            }
+            continue;
+        }
+
+        if (!pipe->async_ending) {
+            return ECAT_UPGRADE_ASYNC_COMPLETE;
+        }
+
+        /* 3. 异步终结阶段: 尾块 0xFF 补齐 -> 流 CRC -> 异步回读 CRC -> 验签 -> 异步 FINALIZE */
+        if (pipe->payload_rx_bytes != pipe->meta.payload_size) {
+            pipe->last_error = LDR_FW_PIPE_ERR_UNDER_RECEIVE;
+            abort_driver_once(pipe);
+            return ECAT_UPGRADE_ASYNC_FAILED;
+        }
+
+        if (pipe->residual_len > 0U) {
+            size_t unit = (size_t)target->write_unit;
+            (void)memset(&pipe->residual_buf[pipe->residual_len], 0xFF, unit - pipe->residual_len);
+            pipe->residual_len = unit;
+            ecat_upgrade_async_result_t fres = pipe_async_flush_residual(pipe, target);
+            if (fres != ECAT_UPGRADE_ASYNC_COMPLETE) {
+                return fres;
+            }
+            continue;
+        }
+
+        uint32_t stream_crc = ldr_crc32_final(&pipe->stream_crc32);
+        if ((pipe->meta.payload_crc32 != 0U) && (stream_crc != pipe->meta.payload_crc32)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_STREAM_CRC;
+            abort_driver_once(pipe);
+            return ECAT_UPGRADE_ASYNC_FAILED;
+        }
+
+        if (!pipe->async_readback_started) {
+            pipe->async_readback_started = true;
+            pipe->async_readback_offset = 0U;
+            ldr_crc32_init(&pipe->async_readback_crc32);
+        }
+
+        if (pipe->async_readback_offset < pipe->meta.payload_size) {
+            uint32_t left = pipe->meta.payload_size - pipe->async_readback_offset;
+            uint32_t chunk = (left < LDR_FW_PIPE_READBACK_CHUNK_LEN)
+                ? left
+                : LDR_FW_PIPE_READBACK_CHUNK_LEN;
+            ecat_async_op_result_t rres;
+            (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+            pipe->async_op.kind = ECAT_ASYNC_DATA_OP_READ;
+            pipe->async_op.offset = pipe->async_readback_offset;
+            pipe->async_op.length = chunk;
+            pipe->async_op.buffer = pipe->async_readback_buf;
+            rres = aops->start(target->user_ctx, &pipe->async_op);
+            if (rres == ECAT_ASYNC_OP_PENDING) {
+                pipe->async_phase = LDR_FW_ASYNC_PHASE_READBACK;
+                return ECAT_UPGRADE_ASYNC_PENDING;
+            }
+            if ((rres != ECAT_ASYNC_OP_COMPLETE) || (pipe->async_op.actual_length != (size_t)chunk)) {
+                pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+            ldr_crc32_update(&pipe->async_readback_crc32, pipe->async_readback_buf, (size_t)chunk);
+            pipe->async_readback_offset += chunk;
+            continue;
+        }
+
+        if (ldr_crc32_final(&pipe->async_readback_crc32) != stream_crc) {
+            pipe->last_error = LDR_FW_PIPE_ERR_READBACK_CRC;
+            abort_driver_once(pipe);
+            return ECAT_UPGRADE_ASYNC_FAILED;
+        }
+
+        if (pipe->signature_active) {
+            int vrc = pipe->security.verifier.finish(pipe->security.verifier.user_ctx);
+            pipe->signature_active = false;
+            if (vrc != 0) {
+                pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+                abort_driver_once(pipe);
+                return ECAT_UPGRADE_ASYNC_FAILED;
+            }
+        }
+
+        ecat_async_op_result_t fin_res;
+        (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_FINALIZE;
+        fin_res = aops->start(target->user_ctx, &pipe->async_op);
+        if (fin_res == ECAT_ASYNC_OP_PENDING) {
+            pipe->async_phase = LDR_FW_ASYNC_PHASE_FINALIZE;
+            return ECAT_UPGRADE_ASYNC_PENDING;
+        }
+        if (fin_res != ECAT_ASYNC_OP_COMPLETE) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+            abort_driver_once(pipe);
+            return ECAT_UPGRADE_ASYNC_FAILED;
+        }
+
+        pipe->driver_finalized = true;
+        pipe->session_active = false;
+        return ECAT_UPGRADE_ASYNC_COMPLETE;
+    }
+}
+
+static ecat_upgrade_async_result_t pipe_async_start(
+    void *ctx,
+    const uint8_t *data,
+    size_t length,
+    bool more_data)
+{
+    ldr_fw_pipeline_t *pipe = (ldr_fw_pipeline_t *)ctx;
+
+    if ((pipe == NULL) || !pipe->session_active || !pipe->is_async ||
+        (pipe->active_target == NULL) || (pipe->async_phase != LDR_FW_ASYNC_PHASE_NONE)) {
+        return ECAT_UPGRADE_ASYNC_FAILED;
+    }
+
+    pipe->async_chunk_ptr = data;
+    pipe->async_chunk_rem = length;
+    pipe->async_ending = !more_data;
+    return pipe_async_drive(pipe);
+}
+
+static ecat_upgrade_async_result_t pipe_async_poll(void *ctx)
+{
+    ldr_fw_pipeline_t *pipe = (ldr_fw_pipeline_t *)ctx;
+
+    if ((pipe == NULL) || !pipe->session_active || !pipe->is_async ||
+        (pipe->active_target == NULL) || (pipe->async_phase == LDR_FW_ASYNC_PHASE_NONE)) {
+        return ECAT_UPGRADE_ASYNC_FAILED;
+    }
+
+    return pipe_async_drive(pipe);
+}
+
+static void pipe_async_abort(void *ctx)
+{
+    abort_driver_once((ldr_fw_pipeline_t *)ctx);
+}
+
+static const ecat_upgrade_async_ops_t s_ldr_fw_pipeline_async_ops = {
+    pipe_async_start,
+    pipe_async_poll,
+    pipe_async_abort
+};
 
 static void pipe_on_abort(void *fw_ctx)
 {
@@ -564,6 +1032,11 @@ int ldr_fw_pipeline_init(
     pipe->initialized = true;
 
     if (ldr_loader_bind_fw_backend(loader, pipe, &s_ldr_fw_pipeline_ops, NULL) != 0) {
+        pipe->initialized = false;
+        return -1;
+    }
+
+    if (ldr_loader_bind_fw_async_ops(loader, &s_ldr_fw_pipeline_async_ops, pipe) != 0) {
         pipe->initialized = false;
         return -1;
     }

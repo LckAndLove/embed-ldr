@@ -817,6 +817,292 @@ static void test_pipeline_signature_and_anti_rollback(void)
     printf("[TEST 6] 流水线可选流式验签与防回滚版本下限原子事务提交 (6 项安全路径)... [PASS]\n");
 }
 
+/* -------------------------------------------------------------------------- */
+/*          TEST 7: 非阻塞异步固件刷写状态机与异步导出回读闭环验证            */
+/* -------------------------------------------------------------------------- */
+
+typedef struct {
+    uint8_t storage[512];
+    uint32_t data_size;
+    uint32_t erased_end;
+    uint32_t pending_ticks;
+    uint32_t current_ticks;
+    uint32_t init_calls;
+    uint32_t invalidate_calls;
+    uint32_t erase_calls;
+    uint32_t write_calls;
+    uint32_t read_calls;
+    uint32_t finalize_calls;
+    uint32_t read_open_calls;
+    uint32_t read_close_calls;
+    uint32_t abort_calls;
+    bool inject_readback_corrupt;
+} mock_async_flash_drv_t;
+
+static void mock_async_reset_stats(mock_async_flash_drv_t *d)
+{
+    d->current_ticks = 0U;
+    d->init_calls = 0U;
+    d->invalidate_calls = 0U;
+    d->erase_calls = 0U;
+    d->write_calls = 0U;
+    d->read_calls = 0U;
+    d->finalize_calls = 0U;
+    d->read_open_calls = 0U;
+    d->read_close_calls = 0U;
+    d->abort_calls = 0U;
+    d->inject_readback_corrupt = false;
+}
+
+static ecat_async_op_result_t mock_async_exec_op(mock_async_flash_drv_t *d, ecat_async_data_op_t *op)
+{
+    switch (op->kind) {
+    case ECAT_ASYNC_DATA_OP_INIT:
+        d->init_calls++;
+        d->erased_end = 0U;
+        d->data_size = 0U;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_INVALIDATE:
+        d->invalidate_calls++;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_ERASE_TO:
+        d->erase_calls++;
+        if (op->need_end > sizeof(d->storage)) {
+            return ECAT_ASYNC_OP_FAILED;
+        }
+        if (op->need_end > d->erased_end) {
+            (void)memset(&d->storage[d->erased_end], 0xFF, op->need_end - d->erased_end);
+            d->erased_end = op->need_end;
+        }
+        op->erased_end = d->erased_end;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_WRITE:
+        d->write_calls++;
+        if ((op->offset + op->length) > sizeof(d->storage)) {
+            return ECAT_ASYNC_OP_FAILED;
+        }
+        (void)memcpy(&d->storage[op->offset], op->buffer, op->length);
+        if ((op->offset + op->length) > d->data_size) {
+            d->data_size = op->offset + op->length;
+        }
+        op->actual_length = op->length;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_READ:
+        d->read_calls++;
+        if ((op->offset + op->length) > sizeof(d->storage)) {
+            return ECAT_ASYNC_OP_FAILED;
+        }
+        (void)memcpy(op->buffer, &d->storage[op->offset], op->length);
+        if (d->inject_readback_corrupt && (op->offset == 0U) && (op->length > 0U)) {
+            op->buffer[0] ^= 0x01U;
+        }
+        op->actual_length = op->length;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_FINALIZE:
+        d->finalize_calls++;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_READ_OPEN:
+        d->read_open_calls++;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_READ_CLOSE:
+        d->read_close_calls++;
+        return ECAT_ASYNC_OP_COMPLETE;
+    default:
+        return ECAT_ASYNC_OP_FAILED;
+    }
+}
+
+static ecat_async_op_result_t mock_async_start(void *ctx, ecat_async_data_op_t *op)
+{
+    mock_async_flash_drv_t *d = (mock_async_flash_drv_t *)ctx;
+    if ((d == NULL) || (op == NULL)) {
+        return ECAT_ASYNC_OP_FAILED;
+    }
+    d->current_ticks = 0U;
+    if (d->pending_ticks == 0U) {
+        return mock_async_exec_op(d, op);
+    }
+    return ECAT_ASYNC_OP_PENDING;
+}
+
+static ecat_async_op_result_t mock_async_poll(void *ctx, ecat_async_data_op_t *op)
+{
+    mock_async_flash_drv_t *d = (mock_async_flash_drv_t *)ctx;
+    if ((d == NULL) || (op == NULL)) {
+        return ECAT_ASYNC_OP_FAILED;
+    }
+    d->current_ticks++;
+    if (d->current_ticks < d->pending_ticks) {
+        return ECAT_ASYNC_OP_PENDING;
+    }
+    return mock_async_exec_op(d, op);
+}
+
+static void mock_async_abort(void *ctx)
+{
+    mock_async_flash_drv_t *d = (mock_async_flash_drv_t *)ctx;
+    if (d != NULL) {
+        d->abort_calls++;
+    }
+}
+
+static uint32_t mock_async_get_data_size(void *ctx)
+{
+    const mock_async_flash_drv_t *d = (const mock_async_flash_drv_t *)ctx;
+    return (d != NULL) ? d->data_size : 0U;
+}
+
+static const ecat_async_data_ops_t s_mock_async_ops = {
+    mock_async_start,
+    mock_async_poll,
+    mock_async_abort
+};
+
+static ldr_transfer_result_t poll_loader_until_done(ldr_loader_t *loader, uint32_t max_iters)
+{
+    ldr_transfer_result_t res = LDR_RES_PENDING;
+    uint32_t iter;
+    for (iter = 0U; iter < max_iters; ++iter) {
+        uint16_t polled_id = 0U;
+        res = ldr_loader_poll(loader, &polled_id);
+        if (res != LDR_RES_PENDING) {
+            return res;
+        }
+    }
+    assert(0 && "async loader poll exceeded max_iters");
+    return LDR_RES_FAILED;
+}
+
+static void test_async_firmware_pipeline(void)
+{
+    ldr_loader_t loader;
+    ldr_fw_pipeline_t pipe;
+    mock_async_flash_drv_t adrv;
+    ldr_transport_endpoint_t uart_ep;
+    ldr_transport_plugin_desc_t ep_desc;
+    ldr_format_plugin_desc_t myfw_desc;
+    uint8_t header_buf[256];
+    uint8_t residual_buf[32];
+    uint8_t staging_buf[128];
+    uint32_t i;
+
+    (void)memset(&adrv, 0, sizeof(adrv));
+    adrv.pending_ticks = 2U;
+
+    assert(ldr_loader_init(&loader) == 0);
+    assert(ldr_loader_set_staging_buffer(&loader, staging_buf, sizeof(staging_buf)) == 0);
+
+    myfw_desc.format_id = CUSTOM_MYFW_FORMAT_ID;
+    myfw_desc.name = "MYFW_V1";
+    myfw_desc.ops = &s_myfw_ops;
+    myfw_desc.plugin_ctx = NULL;
+    assert(ldr_loader_register_format(&loader, &myfw_desc) == 0);
+
+    assert(ldr_fw_pipeline_init(&pipe, &loader, header_buf, sizeof(header_buf),
+                                residual_buf, sizeof(residual_buf)) == 0);
+
+    ldr_target_desc_t fw_target;
+    (void)memset(&fw_target, 0, sizeof(fw_target));
+    fw_target.target_id = 2U;
+    (void)strcpy(fw_target.name, "MCU_ASYNC");
+    fw_target.type = LDR_TARGET_TYPE_FIRMWARE;
+    fw_target.max_size = sizeof(adrv.storage);
+    fw_target.write_unit = 16U;
+    fw_target.permissions = LDR_PERM_RW;
+    fw_target.enabled = true;
+    fw_target.asynchronous = true;
+    fw_target.driver.async_ops = &s_mock_async_ops;
+    fw_target.driver.get_data_size = mock_async_get_data_size;
+    fw_target.user_ctx = &adrv;
+    assert(ldr_loader_register_target(&loader, &fw_target) == 0);
+
+    assert(ldr_transport_endpoint_init(&uart_ep, LDR_TRANSPORT_ID_UART, "UART_ASYNC",
+                                       ldr_loader_get_transfer(&loader), NULL) == 0);
+    assert(ldr_transport_endpoint_make_plugin_desc(
+               &uart_ep, LDR_TRANSPORT_CAP_BIDIRECTIONAL | LDR_TRANSPORT_CAP_ASYNC, &ep_desc) == 0);
+    assert(ldr_loader_register_transport(&loader, &ep_desc) == 0);
+
+    /* 构造 20B MYFW 头 + 50B 载荷 (非 16B 对齐尾块) */
+    uint8_t myfw_img[CUSTOM_MYFW_HDR_LEN + 50U];
+    uint8_t myfw_payload[50];
+    for (i = 0U; i < sizeof(myfw_payload); ++i) {
+        myfw_payload[i] = (uint8_t)(0xA0U + i);
+    }
+    uint32_t myfw_crc = ldr_crc32_calc(myfw_payload, sizeof(myfw_payload));
+    build_myfw_header(myfw_img, 2U, 0x04010000U, (uint32_t)sizeof(myfw_payload), myfw_crc);
+    (void)memcpy(&myfw_img[CUSTOM_MYFW_HDR_LEN], myfw_payload, sizeof(myfw_payload));
+
+    /* 7A: 多分片非阻塞异步固件刷写 + 异步 EXPORT 回读核验 */
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(myfw_img), 0x04010000U) == LDR_RES_COMPLETE);
+
+    /* 分片 1: 10B (头部未齐 -> 立即 COMPLETE，不触碰异步驱动) */
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &myfw_img[0], 10U) == LDR_RES_COMPLETE);
+    assert(adrv.init_calls == 0U);
+
+    /* 分片 2: 26B (凑齐 20B 头部 + 16B 首块载荷 -> 触发异步 INIT/INVALIDATE/ERASE/WRITE) */
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &myfw_img[10], 26U) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(adrv.init_calls == 1U);
+    assert(adrv.invalidate_calls == 1U);
+    assert(adrv.write_calls >= 1U);
+
+    /* 分片 3: 剩余 34B 载荷 -> 异步写入 32B，保留 2B 尾块 */
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &myfw_img[36], 34U) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+
+    /* 异步终结: 0xFF 填充尾块写入 + 异步回读 CRC 核验 + 异步 FINALIZE */
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(adrv.finalize_calls == 1U);
+    assert(adrv.abort_calls == 0U);
+    assert(adrv.read_calls >= 1U);
+    assert(!ldr_loader_is_busy(&loader));
+    assert(memcmp(adrv.storage, myfw_payload, sizeof(myfw_payload)) == 0);
+    for (i = 50U; i < 64U; ++i) {
+        assert(adrv.storage[i] == 0xFFU);
+    }
+
+    /* 异步 EXPORT 回读刚刷入的固件 */
+    uint32_t exp_sz = 0U;
+    uint8_t exp_buf[64];
+    size_t exp_actual = 0U;
+    assert(ldr_transport_endpoint_begin_export(&uart_ep, 2U, &exp_sz) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ecat_transport_endpoint_get_total_export_size(&uart_ep) == 64U);
+    assert(ldr_transport_endpoint_read_chunk(&uart_ep, exp_buf, sizeof(exp_buf), &exp_actual) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(exp_actual == 64U);
+    assert(memcmp(exp_buf, myfw_payload, sizeof(myfw_payload)) == 0);
+    assert(ldr_transport_endpoint_finish_export(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(!ldr_loader_is_busy(&loader));
+
+    /* 7B: 异步写入中途触发 ldr_loader_abort_all() -> 单次 abort 且干净释放锁 */
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(myfw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, myfw_img, 40U) == LDR_RES_PENDING);
+    assert(ldr_loader_is_busy(&loader));
+    ldr_loader_abort_all(&loader);
+    assert(!ldr_loader_is_busy(&loader));
+    assert(adrv.abort_calls == 1U);
+
+    /* 7C: 异步物理回读位翻转 -> LDR_FW_PIPE_ERR_READBACK_CRC, finalize == 0, abort == 1 */
+    mock_async_reset_stats(&adrv);
+    adrv.inject_readback_corrupt = true;
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(myfw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, myfw_img, sizeof(myfw_img)) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_READBACK_CRC);
+    assert(adrv.finalize_calls == 0U);
+    assert(adrv.abort_calls == 1U);
+    assert(!ldr_loader_is_busy(&loader));
+
+    printf("[TEST 7] 非阻塞异步固件刷写状态机 (跨片异步刷写/回读/EXPORT/中途 abort/翻转拦截)... [PASS]\n");
+}
+
 int main(void)
 {
     printf("=== 运行统一中性 ldr_ Loader 框架单元测试 ===\n");
@@ -824,6 +1110,7 @@ int main(void)
     test_foe_free_unified_loader_bidirectional();
     test_format_driven_firmware_pipeline_multiformat_and_security();
     test_pipeline_signature_and_anti_rollback();
+    test_async_firmware_pipeline();
     printf(">>> 统一中性 ldr_ Loader 框架单元测试全部通过！<<<\n");
     return 0;
 }

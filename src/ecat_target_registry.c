@@ -70,7 +70,8 @@ int ecat_target_registry_add(ecat_target_registry_t *reg, const ecat_target_desc
 
     /* 检查读写权限对应的驱动基本有效性 */
     if ((desc->permissions & ECAT_PERM_WRITE) != 0U) {
-        bool async_fw_write = (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous && desc->driver.fw_async_ops != NULL);
+        bool async_fw_write = (desc->type == ECAT_TARGET_TYPE_FIRMWARE && desc->asynchronous &&
+                               (desc->driver.fw_async_ops != NULL || desc->driver.async_ops != NULL));
         bool async_data_write = (desc->type == ECAT_TARGET_TYPE_DATA && desc->asynchronous && desc->driver.async_ops != NULL);
         if (!async_fw_write && !async_data_write) {
             if (desc->driver.io.write == NULL || desc->driver.io.erase_to == NULL) {

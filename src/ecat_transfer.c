@@ -71,6 +71,25 @@ int ecat_transfer_bind_fw_backend(
     return 0;
 }
 
+int ecat_transfer_bind_fw_async_ops(
+    ecat_transfer_t *t,
+    const ecat_upgrade_async_ops_t *ops,
+    void *async_ctx)
+{
+    const ecat_upgrade_session_t *lease;
+
+    if ((t == NULL) || (t->fw_backend_ctx == NULL) || (ops == NULL) || (async_ctx == NULL)) {
+        return -1;
+    }
+    lease = (t->session_ptr != NULL) ? t->session_ptr : &t->session;
+    if (t->active || (lease->owner != NULL)) {
+        return -1;
+    }
+    t->fw_async_ops = ops;
+    t->fw_async_ctx = async_ctx;
+    return 0;
+}
+
 int ecat_transfer_set_staging_buffer(
     ecat_transfer_t *t,
     uint8_t *buf,
