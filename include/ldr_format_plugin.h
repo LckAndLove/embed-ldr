@@ -50,7 +50,8 @@ typedef struct {
     uint32_t fw_version;        /* 固件版本号 */
     uint32_t min_allow_version; /* 防回滚最低允许版本 */
     uint32_t payload_size;      /* 有效负载长度 (字节) */
-    uint32_t payload_crc32;     /* 有效负载 CRC32 (若格式提供) */
+    uint32_t payload_crc32;     /* 有效负载 CRC32 (当 has_payload_crc32 为 true 时有效) */
+    bool     has_payload_crc32; /* 是否携带有效负载 CRC32 校验字段 */
     bool     is_signed;         /* 是否包含数字签名 */
     uint8_t  key_id[LDR_FORMAT_KEY_ID_MAX_LEN];       /* 签名密钥 ID (可选) */
     uint8_t  key_id_len;                              /* 有效密钥 ID 长度 */

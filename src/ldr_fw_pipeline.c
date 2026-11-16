@@ -39,6 +39,7 @@ static void reset_session_fields(ldr_fw_pipeline_t *pipe)
     pipe->async_chunk_rem = 0U;
     pipe->async_ending = false;
     pipe->async_readback_started = false;
+    pipe->async_stream_crc32_final = 0U;
     pipe->async_readback_offset = 0U;
     pipe->async_readback_crc32 = 0U;
 }
@@ -493,7 +494,7 @@ static int pipe_on_end(void *fw_ctx)
     }
 
     stream_crc = ldr_crc32_final(&pipe->stream_crc32);
-    if ((pipe->meta.payload_crc32 != 0U) && (stream_crc != pipe->meta.payload_crc32)) {
+    if (pipe->meta.has_payload_crc32 && (stream_crc != pipe->meta.payload_crc32)) {
         pipe->last_error = LDR_FW_PIPE_ERR_STREAM_CRC;
         return -1;
     }
@@ -615,6 +616,239 @@ static ecat_upgrade_async_result_t pipe_async_flush_residual(
     return pipe_async_start_write_block(pipe, target);
 }
 
+/* 推进当前挂起中的底层异步驱动操作: 返回 1 继续主循环，0 最终完成，-1 PENDING/FAILED */ 
+static int pipe_async_step_poll(
+    ldr_fw_pipeline_t *pipe,
+    const ldr_target_desc_t *target,
+    ecat_upgrade_async_result_t *out_res)
+{
+    const ecat_async_data_ops_t *aops = target->driver.async_ops;
+    ecat_async_op_result_t pres = aops->poll(target->user_ctx, &pipe->async_op);
+
+    if (pres == ECAT_ASYNC_OP_PENDING) {
+        *out_res = ECAT_UPGRADE_ASYNC_PENDING;
+        return -1;
+    }
+    if (pres != ECAT_ASYNC_OP_COMPLETE) {
+        switch (pipe->async_phase) {
+        case LDR_FW_ASYNC_PHASE_INIT:
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INIT;
+            break;
+        case LDR_FW_ASYNC_PHASE_INVALIDATE:
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
+            break;
+        case LDR_FW_ASYNC_PHASE_ERASE:
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
+            break;
+        case LDR_FW_ASYNC_PHASE_READBACK:
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
+            break;
+        case LDR_FW_ASYNC_PHASE_FINALIZE:
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+            break;
+        case LDR_FW_ASYNC_PHASE_WRITE:
+        default:
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
+            break;
+        }
+        abort_driver_once(pipe);
+        *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+        return -1;
+    }
+
+    switch (pipe->async_phase) {
+    case LDR_FW_ASYNC_PHASE_INIT: {
+        ecat_async_op_result_t ires;
+        pipe->driver_initialized = true;
+        (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
+        ires = aops->start(target->user_ctx, &pipe->async_op);
+        if (ires == ECAT_ASYNC_OP_PENDING) {
+            pipe->async_phase = LDR_FW_ASYNC_PHASE_INVALIDATE;
+            *out_res = ECAT_UPGRADE_ASYNC_PENDING;
+            return -1;
+        }
+        if (ires != ECAT_ASYNC_OP_COMPLETE) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+        pipe->header_complete = true;
+        ldr_crc32_init(&pipe->stream_crc32);
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+        return 1;
+    }
+    case LDR_FW_ASYNC_PHASE_INVALIDATE:
+        pipe->header_complete = true;
+        ldr_crc32_init(&pipe->stream_crc32);
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+        return 1;
+    case LDR_FW_ASYNC_PHASE_ERASE: {
+        uint32_t need_end = pipe->written_offset + target->write_unit;
+        ecat_upgrade_async_result_t wres;
+        if (pipe->async_op.erased_end < need_end) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+        pipe->erased_watermark = pipe->async_op.erased_end;
+        wres = pipe_async_start_write_block(pipe, target);
+        if (wres != ECAT_UPGRADE_ASYNC_COMPLETE) {
+            *out_res = wres;
+            return -1;
+        }
+        return 1;
+    }
+    case LDR_FW_ASYNC_PHASE_WRITE:
+        if (pipe->async_op.actual_length != (size_t)target->write_unit) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+        pipe->written_offset += target->write_unit;
+        pipe->residual_len = 0U;
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+        return 1;
+    case LDR_FW_ASYNC_PHASE_READBACK:
+        if (pipe->async_op.actual_length != (size_t)pipe->async_op.length) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+        ldr_crc32_update(&pipe->async_readback_crc32,
+                         pipe->async_readback_buf,
+                         pipe->async_op.actual_length);
+        pipe->async_readback_offset += pipe->async_op.length;
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+        return 1;
+    case LDR_FW_ASYNC_PHASE_FINALIZE:
+        pipe->driver_finalized = true;
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
+        pipe->session_active = false;
+        *out_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+        return 0;
+    case LDR_FW_ASYNC_PHASE_NONE:
+    default:
+        abort_driver_once(pipe);
+        *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+        return -1;
+    }
+}
+
+/* 异步终结阶段推进: 尾块 0xFF 补齐 -> 流 CRC -> 异步回读 CRC -> 验签 -> 异步 FINALIZE */
+static int pipe_async_step_finalize(
+    ldr_fw_pipeline_t *pipe,
+    const ldr_target_desc_t *target,
+    ecat_upgrade_async_result_t *out_res)
+{
+    const ecat_async_data_ops_t *aops = target->driver.async_ops;
+    ecat_async_op_result_t fin_res;
+
+    if (pipe->payload_rx_bytes != pipe->meta.payload_size) {
+        pipe->last_error = LDR_FW_PIPE_ERR_UNDER_RECEIVE;
+        abort_driver_once(pipe);
+        *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+        return -1;
+    }
+
+    if (pipe->residual_len > 0U) {
+        size_t unit = (size_t)target->write_unit;
+        ecat_upgrade_async_result_t fres;
+        (void)memset(&pipe->residual_buf[pipe->residual_len], 0xFF, unit - pipe->residual_len);
+        pipe->residual_len = unit;
+        fres = pipe_async_flush_residual(pipe, target);
+        if (fres != ECAT_UPGRADE_ASYNC_COMPLETE) {
+            *out_res = fres;
+            return -1;
+        }
+        return 1;
+    }
+
+    if (!pipe->async_readback_started) {
+        pipe->async_stream_crc32_final = ldr_crc32_final(&pipe->stream_crc32);
+        if (pipe->meta.has_payload_crc32 &&
+            (pipe->async_stream_crc32_final != pipe->meta.payload_crc32)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_STREAM_CRC;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+        pipe->async_readback_started = true;
+        pipe->async_readback_offset = 0U;
+        ldr_crc32_init(&pipe->async_readback_crc32);
+    }
+
+    if (pipe->async_readback_offset < pipe->meta.payload_size) {
+        uint32_t left = pipe->meta.payload_size - pipe->async_readback_offset;
+        uint32_t chunk = (left < LDR_FW_PIPE_READBACK_CHUNK_LEN)
+            ? left
+            : LDR_FW_PIPE_READBACK_CHUNK_LEN;
+        ecat_async_op_result_t rres;
+        (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_READ;
+        pipe->async_op.offset = pipe->async_readback_offset;
+        pipe->async_op.length = chunk;
+        pipe->async_op.buffer = pipe->async_readback_buf;
+        rres = aops->start(target->user_ctx, &pipe->async_op);
+        if (rres == ECAT_ASYNC_OP_PENDING) {
+            pipe->async_phase = LDR_FW_ASYNC_PHASE_READBACK;
+            *out_res = ECAT_UPGRADE_ASYNC_PENDING;
+            return -1;
+        }
+        if ((rres != ECAT_ASYNC_OP_COMPLETE) || (pipe->async_op.actual_length != (size_t)chunk)) {
+            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+        ldr_crc32_update(&pipe->async_readback_crc32, pipe->async_readback_buf, (size_t)chunk);
+        pipe->async_readback_offset += chunk;
+        return 1;
+    }
+
+    if (ldr_crc32_final(&pipe->async_readback_crc32) != pipe->async_stream_crc32_final) {
+        pipe->last_error = LDR_FW_PIPE_ERR_READBACK_CRC;
+        abort_driver_once(pipe);
+        *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+        return -1;
+    }
+
+    if (pipe->signature_active) {
+        int vrc = pipe->security.verifier.finish(pipe->security.verifier.user_ctx);
+        pipe->signature_active = false;
+        if (vrc != 0) {
+            pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
+            abort_driver_once(pipe);
+            *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+            return -1;
+        }
+    }
+
+    (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
+    pipe->async_op.kind = ECAT_ASYNC_DATA_OP_FINALIZE;
+    fin_res = aops->start(target->user_ctx, &pipe->async_op);
+    if (fin_res == ECAT_ASYNC_OP_PENDING) {
+        pipe->async_phase = LDR_FW_ASYNC_PHASE_FINALIZE;
+        *out_res = ECAT_UPGRADE_ASYNC_PENDING;
+        return -1;
+    }
+    if (fin_res != ECAT_ASYNC_OP_COMPLETE) {
+        pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+        abort_driver_once(pipe);
+        *out_res = ECAT_UPGRADE_ASYNC_FAILED;
+        return -1;
+    }
+
+    pipe->driver_finalized = true;
+    pipe->session_active = false;
+    *out_res = ECAT_UPGRADE_ASYNC_COMPLETE;
+    return 0;
+}
+
 static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
 {
     const ldr_target_desc_t *target = pipe->active_target;
@@ -622,115 +856,20 @@ static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
 
     for (;;) {
         if (pipe->async_phase != LDR_FW_ASYNC_PHASE_NONE) {
-            ecat_async_op_result_t pres = aops->poll(target->user_ctx, &pipe->async_op);
-            if (pres == ECAT_ASYNC_OP_PENDING) {
-                return ECAT_UPGRADE_ASYNC_PENDING;
+            ecat_upgrade_async_result_t step_res = ECAT_UPGRADE_ASYNC_FAILED;
+            int prc = pipe_async_step_poll(pipe, target, &step_res);
+            if (prc <= 0) {
+                return step_res;
             }
-            if (pres != ECAT_ASYNC_OP_COMPLETE) {
-                switch (pipe->async_phase) {
-                case LDR_FW_ASYNC_PHASE_INIT:
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INIT;
-                    break;
-                case LDR_FW_ASYNC_PHASE_INVALIDATE:
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
-                    break;
-                case LDR_FW_ASYNC_PHASE_ERASE:
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
-                    break;
-                case LDR_FW_ASYNC_PHASE_READBACK:
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
-                    break;
-                case LDR_FW_ASYNC_PHASE_FINALIZE:
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
-                    break;
-                case LDR_FW_ASYNC_PHASE_WRITE:
-                default:
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
-                    break;
-                }
-                abort_driver_once(pipe);
-                return ECAT_UPGRADE_ASYNC_FAILED;
-            }
-
-            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_INIT) {
-                ecat_async_op_result_t ires;
-                pipe->driver_initialized = true;
-                (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
-                pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
-                ires = aops->start(target->user_ctx, &pipe->async_op);
-                if (ires == ECAT_ASYNC_OP_PENDING) {
-                    pipe->async_phase = LDR_FW_ASYNC_PHASE_INVALIDATE;
-                    return ECAT_UPGRADE_ASYNC_PENDING;
-                }
-                if (ires != ECAT_ASYNC_OP_COMPLETE) {
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_INVALIDATE;
-                    abort_driver_once(pipe);
-                    return ECAT_UPGRADE_ASYNC_FAILED;
-                }
-                pipe->header_complete = true;
-                ldr_crc32_init(&pipe->stream_crc32);
-                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
-                continue;
-            }
-
-            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_INVALIDATE) {
-                pipe->header_complete = true;
-                ldr_crc32_init(&pipe->stream_crc32);
-                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
-                continue;
-            }
-
-            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_ERASE) {
-                uint32_t need_end = pipe->written_offset + target->write_unit;
-                if (pipe->async_op.erased_end < need_end) {
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_ERASE;
-                    abort_driver_once(pipe);
-                    return ECAT_UPGRADE_ASYNC_FAILED;
-                }
-                pipe->erased_watermark = pipe->async_op.erased_end;
-                ecat_upgrade_async_result_t wres = pipe_async_start_write_block(pipe, target);
-                if (wres != ECAT_UPGRADE_ASYNC_COMPLETE) {
-                    return wres;
-                }
-                continue;
-            }
-
-            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_WRITE) {
-                if (pipe->async_op.actual_length != (size_t)target->write_unit) {
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_WRITE;
-                    abort_driver_once(pipe);
-                    return ECAT_UPGRADE_ASYNC_FAILED;
-                }
-                pipe->written_offset += target->write_unit;
-                pipe->residual_len = 0U;
-                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
-                continue;
-            }
-
-            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_READBACK) {
-                if (pipe->async_op.actual_length != (size_t)pipe->async_op.length) {
-                    pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
-                    abort_driver_once(pipe);
-                    return ECAT_UPGRADE_ASYNC_FAILED;
-                }
-                ldr_crc32_update(&pipe->async_readback_crc32,
-                                 pipe->async_readback_buf,
-                                 pipe->async_op.actual_length);
-                pipe->async_readback_offset += pipe->async_op.length;
-                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
-                continue;
-            }
-
-            if (pipe->async_phase == LDR_FW_ASYNC_PHASE_FINALIZE) {
-                pipe->driver_finalized = true;
-                pipe->async_phase = LDR_FW_ASYNC_PHASE_NONE;
-                pipe->session_active = false;
-                return ECAT_UPGRADE_ASYNC_COMPLETE;
-            }
+            continue;
         }
 
         /* 1. 头部装配阶段 */
         if (!pipe->header_complete) {
+            ecat_async_op_result_t init_res;
+            ecat_async_op_result_t inv_res;
+            int hrc;
+
             if (pipe->async_ending) {
                 pipe->last_error = LDR_FW_PIPE_ERR_UNDER_RECEIVE;
                 abort_driver_once(pipe);
@@ -739,7 +878,7 @@ static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
             if (pipe->async_chunk_rem == 0U) {
                 return ECAT_UPGRADE_ASYNC_COMPLETE;
             }
-            int hrc = pipe_consume_header_chunk(
+            hrc = pipe_consume_header_chunk(
                 pipe, target, &pipe->async_chunk_ptr, &pipe->async_chunk_rem, NULL);
             if (hrc < 0) {
                 abort_driver_once(pipe);
@@ -749,8 +888,6 @@ static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
                 return ECAT_UPGRADE_ASYNC_COMPLETE;
             }
 
-            /* 异步启动 INIT */
-            ecat_async_op_result_t init_res;
             (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
             pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INIT;
             init_res = aops->start(target->user_ctx, &pipe->async_op);
@@ -766,7 +903,6 @@ static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
             }
             pipe->driver_initialized = true;
 
-            ecat_async_op_result_t inv_res;
             (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
             pipe->async_op.kind = ECAT_ASYNC_DATA_OP_INVALIDATE;
             inv_res = aops->start(target->user_ctx, &pipe->async_op);
@@ -786,15 +922,15 @@ static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
 
         /* 2. 载荷流式接收与异步对齐写入 */
         if (pipe->async_chunk_rem > 0U) {
+            size_t unit = (size_t)target->write_unit;
+            size_t need = unit - pipe->residual_len;
+            size_t take = (pipe->async_chunk_rem < need) ? pipe->async_chunk_rem : need;
+
             if (pipe->async_chunk_rem > (size_t)(pipe->meta.payload_size - pipe->payload_rx_bytes)) {
                 pipe->last_error = LDR_FW_PIPE_ERR_OVER_RECEIVE;
                 abort_driver_once(pipe);
                 return ECAT_UPGRADE_ASYNC_FAILED;
             }
-
-            size_t unit = (size_t)target->write_unit;
-            size_t need = unit - pipe->residual_len;
-            size_t take = (pipe->async_chunk_rem < need) ? pipe->async_chunk_rem : need;
 
             if (pipe->signature_active) {
                 if (pipe->security.verifier.update(
@@ -825,96 +961,14 @@ static ecat_upgrade_async_result_t pipe_async_drive(ldr_fw_pipeline_t *pipe)
             return ECAT_UPGRADE_ASYNC_COMPLETE;
         }
 
-        /* 3. 异步终结阶段: 尾块 0xFF 补齐 -> 流 CRC -> 异步回读 CRC -> 验签 -> 异步 FINALIZE */
-        if (pipe->payload_rx_bytes != pipe->meta.payload_size) {
-            pipe->last_error = LDR_FW_PIPE_ERR_UNDER_RECEIVE;
-            abort_driver_once(pipe);
-            return ECAT_UPGRADE_ASYNC_FAILED;
-        }
-
-        if (pipe->residual_len > 0U) {
-            size_t unit = (size_t)target->write_unit;
-            (void)memset(&pipe->residual_buf[pipe->residual_len], 0xFF, unit - pipe->residual_len);
-            pipe->residual_len = unit;
-            ecat_upgrade_async_result_t fres = pipe_async_flush_residual(pipe, target);
-            if (fres != ECAT_UPGRADE_ASYNC_COMPLETE) {
-                return fres;
-            }
-            continue;
-        }
-
-        uint32_t stream_crc = ldr_crc32_final(&pipe->stream_crc32);
-        if ((pipe->meta.payload_crc32 != 0U) && (stream_crc != pipe->meta.payload_crc32)) {
-            pipe->last_error = LDR_FW_PIPE_ERR_STREAM_CRC;
-            abort_driver_once(pipe);
-            return ECAT_UPGRADE_ASYNC_FAILED;
-        }
-
-        if (!pipe->async_readback_started) {
-            pipe->async_readback_started = true;
-            pipe->async_readback_offset = 0U;
-            ldr_crc32_init(&pipe->async_readback_crc32);
-        }
-
-        if (pipe->async_readback_offset < pipe->meta.payload_size) {
-            uint32_t left = pipe->meta.payload_size - pipe->async_readback_offset;
-            uint32_t chunk = (left < LDR_FW_PIPE_READBACK_CHUNK_LEN)
-                ? left
-                : LDR_FW_PIPE_READBACK_CHUNK_LEN;
-            ecat_async_op_result_t rres;
-            (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
-            pipe->async_op.kind = ECAT_ASYNC_DATA_OP_READ;
-            pipe->async_op.offset = pipe->async_readback_offset;
-            pipe->async_op.length = chunk;
-            pipe->async_op.buffer = pipe->async_readback_buf;
-            rres = aops->start(target->user_ctx, &pipe->async_op);
-            if (rres == ECAT_ASYNC_OP_PENDING) {
-                pipe->async_phase = LDR_FW_ASYNC_PHASE_READBACK;
-                return ECAT_UPGRADE_ASYNC_PENDING;
-            }
-            if ((rres != ECAT_ASYNC_OP_COMPLETE) || (pipe->async_op.actual_length != (size_t)chunk)) {
-                pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
-                abort_driver_once(pipe);
-                return ECAT_UPGRADE_ASYNC_FAILED;
-            }
-            ldr_crc32_update(&pipe->async_readback_crc32, pipe->async_readback_buf, (size_t)chunk);
-            pipe->async_readback_offset += chunk;
-            continue;
-        }
-
-        if (ldr_crc32_final(&pipe->async_readback_crc32) != stream_crc) {
-            pipe->last_error = LDR_FW_PIPE_ERR_READBACK_CRC;
-            abort_driver_once(pipe);
-            return ECAT_UPGRADE_ASYNC_FAILED;
-        }
-
-        if (pipe->signature_active) {
-            int vrc = pipe->security.verifier.finish(pipe->security.verifier.user_ctx);
-            pipe->signature_active = false;
-            if (vrc != 0) {
-                pipe->last_error = LDR_FW_PIPE_ERR_SIGNATURE_INVALID;
-                abort_driver_once(pipe);
-                return ECAT_UPGRADE_ASYNC_FAILED;
+        /* 3. 异步终结阶段 */
+        {
+            ecat_upgrade_async_result_t fin_step_res = ECAT_UPGRADE_ASYNC_FAILED;
+            int frc = pipe_async_step_finalize(pipe, target, &fin_step_res);
+            if (frc <= 0) {
+                return fin_step_res;
             }
         }
-
-        ecat_async_op_result_t fin_res;
-        (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
-        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_FINALIZE;
-        fin_res = aops->start(target->user_ctx, &pipe->async_op);
-        if (fin_res == ECAT_ASYNC_OP_PENDING) {
-            pipe->async_phase = LDR_FW_ASYNC_PHASE_FINALIZE;
-            return ECAT_UPGRADE_ASYNC_PENDING;
-        }
-        if (fin_res != ECAT_ASYNC_OP_COMPLETE) {
-            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
-            abort_driver_once(pipe);
-            return ECAT_UPGRADE_ASYNC_FAILED;
-        }
-
-        pipe->driver_finalized = true;
-        pipe->session_active = false;
-        return ECAT_UPGRADE_ASYNC_COMPLETE;
     }
 }
 
@@ -1016,11 +1070,24 @@ int ldr_fw_pipeline_init(
     uint8_t *residual_buf,
     size_t residual_cap)
 {
+    ldr_transfer_t *xfer;
+    void *prev_backend_ctx;
+    const ldr_fw_backend_ops_t *prev_backend_ops;
+    const ecat_upgrade_async_ops_t *prev_async_ops;
+    void *prev_async_ctx;
+
     if ((pipe == NULL) || (loader == NULL) || !loader->initialized ||
+        ldr_loader_is_busy(loader) ||
         (header_buf == NULL) || (header_cap < LDR_FW_PIPE_HEADER_MIN_LEN) ||
         (residual_buf == NULL) || (residual_cap == 0U)) {
         return -1;
     }
+
+    xfer = ldr_loader_get_transfer(loader);
+    prev_backend_ctx = xfer->fw_backend_ctx;
+    prev_backend_ops = xfer->fw_backend_ops;
+    prev_async_ops = xfer->fw_async_ops;
+    prev_async_ctx = xfer->fw_async_ctx;
 
     (void)memset(pipe, 0, sizeof(*pipe));
     pipe->formats = ldr_loader_get_formats(loader);
@@ -1031,12 +1098,12 @@ int ldr_fw_pipeline_init(
     pipe->residual_cap = residual_cap;
     pipe->initialized = true;
 
-    if (ldr_loader_bind_fw_backend(loader, pipe, &s_ldr_fw_pipeline_ops, NULL) != 0) {
-        pipe->initialized = false;
-        return -1;
-    }
-
-    if (ldr_loader_bind_fw_async_ops(loader, &s_ldr_fw_pipeline_async_ops, pipe) != 0) {
+    if ((ldr_loader_bind_fw_backend(loader, pipe, &s_ldr_fw_pipeline_ops, NULL) != 0) ||
+        (ldr_loader_bind_fw_async_ops(loader, &s_ldr_fw_pipeline_async_ops, pipe) != 0)) {
+        xfer->fw_backend_ctx = prev_backend_ctx;
+        xfer->fw_backend_ops = prev_backend_ops;
+        xfer->fw_async_ops = prev_async_ops;
+        xfer->fw_async_ctx = prev_async_ctx;
         pipe->initialized = false;
         return -1;
     }

@@ -170,10 +170,13 @@ ldr_format_probe_result_t ldr_format_registry_probe_and_parse(
 
         pres = slot->ops->probe(buf, len, &hdr_size, slot->plugin_ctx);
         if (pres == LDR_FORMAT_MATCH) {
+            if (hdr_size == 0U) {
+                return LDR_FORMAT_INVALID;
+            }
             if (out_header_size != NULL) {
                 *out_header_size = hdr_size;
             }
-            if ((hdr_size == 0U) || (len < (size_t)hdr_size)) {
+            if (len < (size_t)hdr_size) {
                 return LDR_FORMAT_NEED_MORE;
             }
             (void)memset(out_meta, 0, sizeof(*out_meta));

@@ -55,10 +55,17 @@ int ecat_transfer_bind_fw_backend(
     const ldr_fw_backend_ops_t *ops,
     ecat_upgrade_session_t *shared_session)
 {
+    const ecat_upgrade_session_t *cur_lease;
+
     if ((t == NULL) || (t->registry == NULL) || (fw_ctx == NULL) || (ops == NULL)) {
         return -1;
     }
-    if (t->active) {
+    if ((ops->begin_target == NULL) || (ops->on_data == NULL) ||
+        (ops->on_end == NULL) || (ops->on_abort == NULL)) {
+        return -1;
+    }
+    cur_lease = (t->session_ptr != NULL) ? t->session_ptr : &t->session;
+    if (t->active || (cur_lease->owner != NULL)) {
         return -1;
     }
     if ((shared_session != NULL) && (shared_session->owner != NULL)) {
@@ -67,6 +74,9 @@ int ecat_transfer_bind_fw_backend(
 
     t->fw_backend_ctx = fw_ctx;
     t->fw_backend_ops = ops;
+    /* 切换固件后端时同步清理旧异步操作绑定，防止残留跨后端指针 */
+    t->fw_async_ops = NULL;
+    t->fw_async_ctx = NULL;
     t->session_ptr = (shared_session != NULL) ? shared_session : &t->session;
     return 0;
 }
@@ -78,11 +88,19 @@ int ecat_transfer_bind_fw_async_ops(
 {
     const ecat_upgrade_session_t *lease;
 
-    if ((t == NULL) || (t->fw_backend_ctx == NULL) || (ops == NULL) || (async_ctx == NULL)) {
+    if ((t == NULL) || (t->fw_backend_ctx == NULL) || (t->fw_backend_ops == NULL) ||
+        (ops == NULL) || (async_ctx == NULL)) {
+        return -1;
+    }
+    if ((ops->start == NULL) || (ops->poll == NULL) || (ops->abort == NULL)) {
         return -1;
     }
     lease = (t->session_ptr != NULL) ? t->session_ptr : &t->session;
     if (t->active || (lease->owner != NULL)) {
+        return -1;
+    }
+    if ((t->fw_backend_ops->validate_async_binding != NULL) &&
+        !t->fw_backend_ops->validate_async_binding(t->fw_backend_ctx, ops, async_ctx)) {
         return -1;
     }
     t->fw_async_ops = ops;

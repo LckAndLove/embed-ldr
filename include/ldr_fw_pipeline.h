@@ -132,6 +132,7 @@ typedef struct {
     size_t async_chunk_rem;
     bool async_ending;
     bool async_readback_started;
+    uint32_t async_stream_crc32_final;
     uint32_t async_readback_offset;
     uint32_t async_readback_crc32;
     uint8_t async_readback_buf[LDR_FW_PIPE_READBACK_CHUNK_LEN];

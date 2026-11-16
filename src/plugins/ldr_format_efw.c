@@ -71,6 +71,7 @@ static int efw_plugin_parse_and_verify(
     out_meta->min_allow_version = hdr.min_allow_version;
     out_meta->payload_size = hdr.payload_length;
     out_meta->payload_crc32 = hdr.payload_crc32;
+    out_meta->has_payload_crc32 = true;
     out_meta->is_signed = hdr.signed_package;
     if (hdr.signed_package) {
         (void)memcpy(out_meta->key_id, hdr.key_id, ECAT_FOE_EFW_KEY_ID_LEN);

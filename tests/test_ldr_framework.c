@@ -72,6 +72,7 @@ static int myfw_parse_and_verify(
     out_meta->fw_version = read_le32(&header_buf[8]);
     out_meta->payload_size = read_le32(&header_buf[12]);
     out_meta->payload_crc32 = read_le32(&header_buf[16]);
+    out_meta->has_payload_crc32 = true;
     out_meta->is_signed = false;
     return (out_meta->payload_size > 0U) ? 0 : -1;
 }
@@ -1100,7 +1101,71 @@ static void test_async_firmware_pipeline(void)
     assert(adrv.abort_calls == 1U);
     assert(!ldr_loader_is_busy(&loader));
 
-    printf("[TEST 7] 非阻塞异步固件刷写状态机 (跨片异步刷写/回读/EXPORT/中途 abort/翻转拦截)... [PASS]\n");
+    /* 7D: 头部 payload_crc32 == 0 时 (has_payload_crc32 == true) 不得跳过流式 CRC 核验 */
+    uint8_t zero_crc_img[CUSTOM_MYFW_HDR_LEN + 50U];
+    build_myfw_header(zero_crc_img, 2U, 0x04020000U, (uint32_t)sizeof(myfw_payload), 0U);
+    (void)memcpy(&zero_crc_img[CUSTOM_MYFW_HDR_LEN], myfw_payload, sizeof(myfw_payload));
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(zero_crc_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, zero_crc_img, sizeof(zero_crc_img)) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_STREAM_CRC);
+    assert(adrv.finalize_calls == 0U);
+    assert(adrv.abort_calls == 1U);
+
+    /* 7E: 异步 EFW v2 + 流式验签组合验证 (合法通过 & 签名篡改单次 abort) */
+    ldr_format_plugin_desc_t efw_desc;
+    mock_sig_ctx_t sig_ctx;
+    ldr_fw_security_cfg_t sec;
+    (void)memset(&sig_ctx, 0, sizeof(sig_ctx));
+    (void)memset(&sec, 0, sizeof(sec));
+    assert(ldr_format_efw_make_plugin_desc(NULL, &efw_desc) == 0);
+    assert(ldr_loader_register_format(&loader, &efw_desc) == 0);
+    sec.require_signature = true;
+    sec.verifier.begin = mock_sig_begin;
+    sec.verifier.update = mock_sig_update;
+    sec.verifier.finish = mock_sig_finish;
+    sec.verifier.abort = mock_sig_abort;
+    sec.verifier.user_ctx = &sig_ctx;
+    assert(ldr_fw_pipeline_set_security(&pipe, &sec) == 0);
+
+    uint8_t efw_payload[48];
+    for (i = 0U; i < sizeof(efw_payload); ++i) {
+        efw_payload[i] = (uint8_t)(0x30U + i);
+    }
+    uint32_t efw_crc = ldr_crc32_calc(efw_payload, sizeof(efw_payload));
+    uint8_t efw_img[ECAT_FOE_EFW_HEADER_MIN_LEN + sizeof(efw_payload)];
+    (void)memcpy(&efw_img[ECAT_FOE_EFW_HEADER_MIN_LEN], efw_payload, sizeof(efw_payload));
+
+    /* 合法异步验签提交 */
+    build_signed_efw_header(efw_img, 2U, 0x05000000U, 0x01000000U, (uint32_t)sizeof(efw_payload), efw_crc, efw_crc);
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(efw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &efw_img[0], 100U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &efw_img[100], sizeof(efw_img) - 100U) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(adrv.finalize_calls == 1U);
+    assert(adrv.abort_calls == 0U);
+    assert(memcmp(adrv.storage, efw_payload, sizeof(efw_payload)) == 0);
+
+    /* 篡改签名 -> 异步 finish 拦截且单次 abort */
+    build_signed_efw_header(efw_img, 2U, 0x05000001U, 0x01000000U, (uint32_t)sizeof(efw_payload), efw_crc, efw_crc ^ 0x55AAU);
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(efw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &efw_img[0], 100U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, &efw_img[100], sizeof(efw_img) - 100U) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_SIGNATURE_INVALID);
+    assert(adrv.finalize_calls == 0U);
+    assert(adrv.abort_calls == 1U);
+
+    printf("[TEST 7] 非阻塞异步固件刷写状态机 (跨片刷写/回读/EXPORT/中途 abort/翻转/零 CRC 防绕过/异步验签)... [PASS]\n");
 }
 
 int main(void)
