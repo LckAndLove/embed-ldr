@@ -36,7 +36,7 @@ int ldr_loader_bind_fw_backend(
     ldr_loader_t *loader,
     void *fw_ctx,
     const ldr_fw_backend_ops_t *ops,
-    ecat_upgrade_session_t *shared_session)
+    ldr_session_t *shared_session)
 {
     if ((loader == NULL) || !loader->initialized) {
         return -1;
@@ -46,7 +46,7 @@ int ldr_loader_bind_fw_backend(
 
 int ldr_loader_bind_fw_async_ops(
     ldr_loader_t *loader,
-    const ecat_upgrade_async_ops_t *ops,
+    const ldr_fw_async_ops_t *ops,
     void *async_ctx)
 {
     if ((loader == NULL) || !loader->initialized) {

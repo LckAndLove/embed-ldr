@@ -35,21 +35,39 @@ extern "C" {
 /* -------------------------------------------------------------------------- */
 
 /* 目标存储插件层 */
-typedef ecat_target_type_t       ldr_target_type_t;
-typedef ecat_async_op_result_t   ldr_async_op_result_t;
+typedef ecat_foe_target_driver_t  ldr_storage_io_ops_t;
+typedef ecat_target_type_t        ldr_target_type_t;
+typedef ecat_async_op_result_t    ldr_async_op_result_t;
 typedef ecat_async_data_op_kind_t ldr_async_data_op_kind_t;
-typedef ecat_async_data_op_t     ldr_async_data_op_t;
-typedef ecat_async_data_ops_t    ldr_async_data_ops_t;
-typedef ecat_target_driver_t     ldr_target_driver_t;
-typedef ecat_target_desc_t       ldr_target_desc_t;
-typedef ecat_target_acl_rule_t   ldr_target_acl_rule_t;
-typedef ecat_target_registry_t   ldr_target_registry_t;
+typedef ecat_async_data_op_t      ldr_async_data_op_t;
+typedef ecat_async_data_ops_t     ldr_async_data_ops_t;
+typedef ecat_target_driver_t      ldr_target_driver_t;
+typedef ecat_target_desc_t        ldr_target_desc_t;
+typedef ecat_target_acl_rule_t    ldr_target_acl_rule_t;
+typedef ecat_target_registry_t    ldr_target_registry_t;
+typedef ecat_upgrade_session_t    ldr_session_t;
+typedef ecat_upgrade_async_result_t ldr_fw_async_result_t;
+typedef ecat_upgrade_async_ops_t  ldr_fw_async_ops_t;
 
 #define LDR_PERM_READ            ECAT_PERM_READ
 #define LDR_PERM_WRITE           ECAT_PERM_WRITE
 #define LDR_PERM_RW              ECAT_PERM_RW
 #define LDR_TARGET_TYPE_FIRMWARE ECAT_TARGET_TYPE_FIRMWARE
 #define LDR_TARGET_TYPE_DATA     ECAT_TARGET_TYPE_DATA
+
+#define LDR_ASYNC_OP_FAILED      ECAT_ASYNC_OP_FAILED
+#define LDR_ASYNC_OP_COMPLETE    ECAT_ASYNC_OP_COMPLETE
+#define LDR_ASYNC_OP_PENDING     ECAT_ASYNC_OP_PENDING
+
+#define LDR_ASYNC_DATA_OP_INIT                ECAT_ASYNC_DATA_OP_INIT
+#define LDR_ASYNC_DATA_OP_INVALIDATE          ECAT_ASYNC_DATA_OP_INVALIDATE
+#define LDR_ASYNC_DATA_OP_ERASE_TO            ECAT_ASYNC_DATA_OP_ERASE_TO
+#define LDR_ASYNC_DATA_OP_WRITE               ECAT_ASYNC_DATA_OP_WRITE
+#define LDR_ASYNC_DATA_OP_READ                ECAT_ASYNC_DATA_OP_READ
+#define LDR_ASYNC_DATA_OP_FINALIZE            ECAT_ASYNC_DATA_OP_FINALIZE
+#define LDR_ASYNC_DATA_OP_READ_OPEN           ECAT_ASYNC_DATA_OP_READ_OPEN
+#define LDR_ASYNC_DATA_OP_READ_CLOSE          ECAT_ASYNC_DATA_OP_READ_CLOSE
+#define LDR_ASYNC_DATA_OP_FINALIZE_WITH_FLOOR ECAT_ASYNC_DATA_OP_FINALIZE_WITH_FLOOR
 
 /* 双向传输核心层 */
 typedef ecat_transfer_result_t   ldr_transfer_result_t;
@@ -126,14 +144,14 @@ int ldr_loader_bind_fw_backend(
     ldr_loader_t *loader,
     void *fw_ctx,
     const ldr_fw_backend_ops_t *ops,
-    ecat_upgrade_session_t *shared_session);
+    ldr_session_t *shared_session);
 
 /**
  * @brief 向统一 Loader 框架绑定可选异步固件操作虚表
  */
 int ldr_loader_bind_fw_async_ops(
     ldr_loader_t *loader,
-    const ecat_upgrade_async_ops_t *ops,
+    const ldr_fw_async_ops_t *ops,
     void *async_ctx);
 
 /**

@@ -14,13 +14,16 @@
 | **插件层 2：传输通道插件** | `include/ecat_transport_plugin.h`, `src/ecat_transport_plugin.c`, `include/ecat_transport_endpoint.h` | 统一通道能力声明（`IMPORT` / `EXPORT` / `ASYNC`）、注册与主循环轮询；内置可选 FoE（WRQ + RRQ）、File 流，支持自定义 UART/CAN/USB/BLE 通道 |
 | **插件层 3：格式与固件刷写流水线** | `include/ldr_format_plugin.h`, `include/ldr_fw_pipeline.h`, `src/ldr_fw_pipeline.c`, `src/plugins/ldr_format_efw.c` | 通过 `ldr_format_registry_t` 自动探测并校验 EFW 或自定义镜像格式，由 `ldr_fw_pipeline_t` 驱动防变砖刷写（支持同步与基于 `ldr_loader_poll()` 的非阻塞异步状态机，内置流式验签接口 `ldr_signature_verifier_t`、防回滚版本下限原子事务提交与流/回读双 CRC 核验） |
 
-## 2. 双向能力契约
+## 2. 双向能力矩阵
 
-所有具备双向物理收发能力的通道插件均支持 `IMPORT` 与 `EXPORT`：
+| 通道插件 | IMPORT (同步) | IMPORT (异步) | EXPORT (同步) | EXPORT (异步) | 说明 |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **自定义通道 (`ldr_transport_endpoint_t`)** | 支持 | 支持 | 支持 | 支持 | 参考 [ldr_uart_transport_template.h](../../examples/custom_transport_template/ldr_uart_transport_template.h) 快速接入 UART/CAN/USB/BLE |
+| **宿主文件流 (`ENABLE_FILE=1`)** | 支持 | 支持 | 支持 | 支持 | `ecat_transfer_file_t`，用于桌面工具与本地回放 |
+| **FoE SSC (`ENABLE_FOE=1 FOE_STACK=ssc`)** | 支持 | 支持 | 支持 | 暂不支持 | 支持目标名与 `<PROJECT>_<TARGET>` 规范名、整包 EOF、连续 `offset` 与 ACL 拦截 |
+| **FoE SOES (`ENABLE_FOE=1 FOE_STACK=soes`)** | 支持 | 暂不支持 | 暂不支持 | 暂不支持 | 仅用于兼容现有 SOES WRQ 升级链路 |
 
-- **FoE 通道**（`ENABLE_FOE=1`）：WRQ 导入（同步/异步）+ SSC 同步 RRQ 导出（支持目标名与 `<PROJECT>_<TARGET>` 规范名、整包 0 字节 EOF、连续 `offset` 校验、未完成固件禁读与 ACL 拦截）。
-- **宿主文件流通道**（`ENABLE_FILE=1`）：`ecat_transfer_file_t` 完整支持同步与异步 `IMPORT` / `EXPORT`。
-- **自定义通道插件**：参考 [ldr_uart_transport_template.h](../../examples/custom_transport_template/ldr_uart_transport_template.h) 与 [ldr_uart_transport_template.c](../../examples/custom_transport_template/ldr_uart_transport_template.c)，通过 `ecat_transport_endpoint_t` + `ecat_transport_endpoint_make_plugin_desc()` 即可快速接入任意自定义总线。
+> 架构建议：新项目统一使用 `ldr_fw_pipeline_t` + `driver.async_ops`（同步与异步均支持流式验签与防回滚原子提交）；`ecat_foe_core` / `driver.fw_async_ops` 作为旧版 FoE 兼容后端保留。
 
 ## 3. 构建裁剪矩阵
 
@@ -28,10 +31,10 @@
 
 | 配置场景 | 裁剪参数 | 说明 |
 | :--- | :--- | :--- |
-| 纯中性无 FoE/文件流 | `ENABLE_FOE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=0` | 仅含 `ldr_` 中性核心、目标/通道/格式注册中心，对接用户自定义总线与格式 |
-| 中性核心 + EFW 格式插件 | `ENABLE_FOE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=1` | 无 EtherCAT 协议栈，复用 EFW v2 容器头校验 |
-| 中性核心 + 宿主文件流 | `ENABLE_FOE=0 ENABLE_FILE=1` | 用于桌面工具、回放测试或本地存储双向导入导出 |
-| 完整栈（FoE SSC + 文件流） | `ENABLE_FOE=1 FOE_STACK=ssc ENABLE_FILE=1` | 同时启用 EtherCAT FoE 双向升级/导出与文件流插件 |
+| 纯中性无 FoE/EFW/文件流 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=0` | 仅含 9 个纯中性核心源文件（`nm -u` 零 FoE 符号依赖），对接自定义总线与格式 |
+| 中性核心 + EFW 格式插件 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=1` | 无 EtherCAT 协议栈，复用 EFW v2 容器头校验 |
+| 中性核心 + 宿主文件流 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=1 ENABLE_EFW_PLUGIN=0` | 用于桌面工具、回放测试或本地存储双向导入导出 |
+| 完整栈（FoE SSC + 文件流） | `ENABLE_FOE=1 ENABLE_FOE_CORE=1 FOE_STACK=ssc ENABLE_FILE=1` | 同时启用 EtherCAT FoE 双向升级/导出与文件流插件 |
 
 执行 `make test-ldr-trim-matrix` 可一键验证上述 4 种裁剪矩阵的独立编译与自定义 UART 双向模板运行。
 

@@ -31,13 +31,24 @@ TEST_SSC_SRC = tests/mock_driver.c tests/test_ssc_adapter_mock.c
 
 # Product library source selection; no test stubs are used for this target.
 ENABLE_FOE ?= 1
+ENABLE_FOE_CORE ?= 1
 ENABLE_FILE ?= 0
 ENABLE_EFW_PLUGIN ?= 1
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
-UPGRADE_LIBRARY_SOURCES = src/ldr_crc32.c src/ecat_foe_efw.c src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_fw_pipeline.c src/ldr_loader.c
+NEUTRAL_LIBRARY_SOURCES = src/ldr_crc32.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_fw_pipeline.c src/ldr_loader.c
+UPGRADE_LIBRARY_SOURCES = $(NEUTRAL_LIBRARY_SOURCES)
+UPGRADE_EXTRA_CFLAGS =
 ifeq ($(ENABLE_EFW_PLUGIN),1)
-UPGRADE_LIBRARY_SOURCES += src/plugins/ldr_format_efw.c
+UPGRADE_LIBRARY_SOURCES += src/ecat_foe_efw.c src/plugins/ldr_format_efw.c
+endif
+ifeq ($(ENABLE_FOE_CORE),1)
+ifneq ($(ENABLE_EFW_PLUGIN),1)
+UPGRADE_LIBRARY_SOURCES += src/ecat_foe_efw.c
+endif
+UPGRADE_LIBRARY_SOURCES += src/ecat_foe_core.c src/ecat_foe_target_async.c src/ecat_foe_core_async.c
+else
+UPGRADE_EXTRA_CFLAGS += -DLDR_NEUTRAL_BUILD=1
 endif
 ifeq ($(ENABLE_FILE),1)
 UPGRADE_LIBRARY_SOURCES += src/adapters/ecat_transfer_file.c
@@ -80,14 +91,16 @@ build:
 .PHONY: build-upgrade test-upgrade-build
 build-upgrade:
 	@case "$(ENABLE_FILE)" in 0|1) ;; *) echo "Invalid ENABLE_FILE"; exit 1 ;; esac
-	@case "$(ENABLE_FOE):$(FOE_STACK)" in 0:*|1:ssc|1:soes) ;; *) echo "Invalid ENABLE_FOE or FOE_STACK"; exit 1 ;; esac
+	@case "$(ENABLE_EFW_PLUGIN)" in 0|1) ;; *) echo "Invalid ENABLE_EFW_PLUGIN"; exit 1 ;; esac
+	@case "$(ENABLE_FOE_CORE)" in 0|1) ;; *) echo "Invalid ENABLE_FOE_CORE"; exit 1 ;; esac
+	@case "$(ENABLE_FOE):$(ENABLE_FOE_CORE):$(FOE_STACK)" in 0:*|1:1:ssc|1:1:soes) ;; *) echo "Invalid ENABLE_FOE/ENABLE_FOE_CORE/FOE_STACK"; exit 1 ;; esac
 	@mkdir -p "$(UPGRADE_BUILD_DIR)"
 	@$(PYTHON) tools/safe_build.py check --build-dir "$(UPGRADE_BUILD_DIR)" --files libecat_upgrade.a
 	@TMP_LIBRARY_DIR=$$(mktemp -d /tmp/ecat_upgrade_library_XXXXXX) && \
 	trap 'rm -rf "$$TMP_LIBRARY_DIR"' EXIT INT TERM && \
 	for source in $(UPGRADE_LIBRARY_SOURCES); do \
 		object="$$TMP_LIBRARY_DIR/$$(basename "$$source" .c).o"; \
-		$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) $(UPGRADE_STACK_CFLAGS) $(if $(SOES_DIR),-I"$(SOES_DIR)",) -c "$$source" -o "$$object" || exit 1; \
+		$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) $(UPGRADE_EXTRA_CFLAGS) $(UPGRADE_STACK_CFLAGS) $(if $(SOES_DIR),-I"$(SOES_DIR)",) -c "$$source" -o "$$object" || exit 1; \
 	done && \
 	$(AR) rcs "$$TMP_LIBRARY_DIR/libecat_upgrade.a" "$$TMP_LIBRARY_DIR/"*.o && \
 	$(PYTHON) -c 'import shutil,sys; src=open(sys.argv[1], "rb"); dst=open(sys.argv[2], "xb"); shutil.copyfileobj(src,dst); dst.close(); src.close()' "$$TMP_LIBRARY_DIR/libecat_upgrade.a" "$(UPGRADE_BUILD_DIR)/libecat_upgrade.a" && \

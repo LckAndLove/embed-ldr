@@ -74,7 +74,8 @@ typedef enum {
     ECAT_ASYNC_DATA_OP_READ,
     ECAT_ASYNC_DATA_OP_FINALIZE,
     ECAT_ASYNC_DATA_OP_READ_OPEN,
-    ECAT_ASYNC_DATA_OP_READ_CLOSE
+    ECAT_ASYNC_DATA_OP_READ_CLOSE,
+    ECAT_ASYNC_DATA_OP_FINALIZE_WITH_FLOOR
 } ecat_async_data_op_kind_t;
 
 /* 真正非阻塞异步数据操作描述符 (生命周期保持稳定直至 COMPLETE 或 FAILED) */
@@ -86,6 +87,9 @@ typedef struct {
     uint32_t length;                /* 缓冲区数据长度 */
     uint8_t *buffer;                /* 数据暂存区指针 (WRITE 输入暂存或 READ 输出暂存) */
     size_t actual_length;           /* 驱动反馈的实际处理字节数 (READ/WRITE) */
+    uint16_t target_id;             /* 目标区块 ID (FINALIZE_WITH_FLOOR) */
+    uint32_t fw_version;            /* 候选固件版本号 (FINALIZE_WITH_FLOOR) */
+    uint32_t min_allow_version;     /* 防回滚最低允许版本 (FINALIZE_WITH_FLOOR) */
 } ecat_async_data_op_t;
 
 /* 真正非阻塞异步数据驱动操作接口 */

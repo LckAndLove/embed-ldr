@@ -834,10 +834,13 @@ typedef struct {
     uint32_t write_calls;
     uint32_t read_calls;
     uint32_t finalize_calls;
+    uint32_t finalize_floor_calls;
     uint32_t read_open_calls;
     uint32_t read_close_calls;
     uint32_t abort_calls;
+    uint32_t persisted_floor;
     bool inject_readback_corrupt;
+    bool inject_floor_commit_fail;
 } mock_async_flash_drv_t;
 
 static void mock_async_reset_stats(mock_async_flash_drv_t *d)
@@ -849,10 +852,23 @@ static void mock_async_reset_stats(mock_async_flash_drv_t *d)
     d->write_calls = 0U;
     d->read_calls = 0U;
     d->finalize_calls = 0U;
+    d->finalize_floor_calls = 0U;
     d->read_open_calls = 0U;
     d->read_close_calls = 0U;
     d->abort_calls = 0U;
     d->inject_readback_corrupt = false;
+    d->inject_floor_commit_fail = false;
+}
+
+static int mock_async_get_floor(uint16_t target_id, uint32_t *out_floor, void *user_ctx)
+{
+    const mock_async_flash_drv_t *d = (const mock_async_flash_drv_t *)user_ctx;
+    (void)target_id;
+    if ((d == NULL) || (out_floor == NULL)) {
+        return -1;
+    }
+    *out_floor = d->persisted_floor;
+    return 0;
 }
 
 static ecat_async_op_result_t mock_async_exec_op(mock_async_flash_drv_t *d, ecat_async_data_op_t *op)
@@ -901,6 +917,15 @@ static ecat_async_op_result_t mock_async_exec_op(mock_async_flash_drv_t *d, ecat
         return ECAT_ASYNC_OP_COMPLETE;
     case ECAT_ASYNC_DATA_OP_FINALIZE:
         d->finalize_calls++;
+        return ECAT_ASYNC_OP_COMPLETE;
+    case ECAT_ASYNC_DATA_OP_FINALIZE_WITH_FLOOR:
+        d->finalize_floor_calls++;
+        if (d->inject_floor_commit_fail || (op->fw_version < d->persisted_floor)) {
+            return ECAT_ASYNC_OP_FAILED;
+        }
+        if (op->min_allow_version > d->persisted_floor) {
+            d->persisted_floor = op->min_allow_version;
+        }
         return ECAT_ASYNC_OP_COMPLETE;
     case ECAT_ASYNC_DATA_OP_READ_OPEN:
         d->read_open_calls++;
@@ -984,7 +1009,7 @@ static void test_async_firmware_pipeline(void)
     ldr_format_plugin_desc_t myfw_desc;
     uint8_t header_buf[256];
     uint8_t residual_buf[32];
-    uint8_t staging_buf[128];
+    uint8_t staging_buf[256];
     uint32_t i;
 
     (void)memset(&adrv, 0, sizeof(adrv));
@@ -1165,7 +1190,49 @@ static void test_async_firmware_pipeline(void)
     assert(adrv.finalize_calls == 0U);
     assert(adrv.abort_calls == 1U);
 
-    printf("[TEST 7] 非阻塞异步固件刷写状态机 (跨片刷写/回读/EXPORT/中途 abort/翻转/零 CRC 防绕过/异步验签)... [PASS]\n");
+    /* 7F: 异步固件 + 流式验签 + 防回滚版本下限原子事务提交 (拒绝低版本 / 抬升下限 / 提交失败单次 abort) */
+    adrv.persisted_floor = 0x05000000U;
+    sec.enable_anti_rollback = true;
+    sec.get_version_floor = mock_async_get_floor;
+    sec.anti_rollback_ctx = &adrv;
+    assert(ldr_fw_pipeline_set_security(&pipe, &sec) == 0);
+
+    /* 低于下限 (0x04990000 < 0x05000000) -> 0 驱动调用 */
+    build_signed_efw_header(efw_img, 2U, 0x04990000U, 0x04990000U, (uint32_t)sizeof(efw_payload), efw_crc, efw_crc);
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(efw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, efw_img, sizeof(efw_img)) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_ANTI_ROLLBACK_REJECTED);
+    assert(adrv.init_calls == 0U);
+    assert(adrv.abort_calls == 0U);
+
+    /* 合法异步防回滚原子提交 -> 抬升持久化下限至 0x05020000 */
+    build_signed_efw_header(efw_img, 2U, 0x05050000U, 0x05020000U, (uint32_t)sizeof(efw_payload), efw_crc, efw_crc);
+    mock_async_reset_stats(&adrv);
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(efw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, efw_img, sizeof(efw_img)) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(adrv.finalize_calls == 0U);
+    assert(adrv.finalize_floor_calls == 1U);
+    assert(adrv.abort_calls == 0U);
+    assert(adrv.persisted_floor == 0x05020000U);
+
+    /* 异步原子提交失败 -> LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT, 单次 abort, 下限不变 */
+    build_signed_efw_header(efw_img, 2U, 0x06000000U, 0x05990000U, (uint32_t)sizeof(efw_payload), efw_crc, efw_crc);
+    mock_async_reset_stats(&adrv);
+    adrv.inject_floor_commit_fail = true;
+    assert(ldr_transport_endpoint_begin_import(&uart_ep, 2U, (uint32_t)sizeof(efw_img), 0U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_write_chunk(&uart_ep, efw_img, sizeof(efw_img)) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_COMPLETE);
+    assert(ldr_transport_endpoint_finish_import(&uart_ep) == LDR_RES_PENDING);
+    assert(poll_loader_until_done(&loader, 200U) == LDR_RES_FAILED);
+    assert(ldr_fw_pipeline_get_last_error(&pipe) == LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT);
+    assert(adrv.abort_calls == 1U);
+    assert(adrv.persisted_floor == 0x05020000U);
+
+    printf("[TEST 7] 非阻塞异步固件刷写状态机 (跨片刷写/回读/EXPORT/中途 abort/翻转/零 CRC 防绕过/异步验签与防回滚)... [PASS]\n");
 }
 
 int main(void)

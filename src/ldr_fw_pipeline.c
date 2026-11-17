@@ -325,8 +325,7 @@ static int pipe_begin_target(
     }
 
     if (target->asynchronous) {
-        if (pipe->security.enable_anti_rollback ||
-            (target->driver.async_ops == NULL) ||
+        if ((target->driver.async_ops == NULL) ||
             (target->driver.async_ops->start == NULL) ||
             (target->driver.async_ops->poll == NULL) ||
             (target->driver.async_ops->abort == NULL)) {
@@ -644,7 +643,9 @@ static int pipe_async_step_poll(
             pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_READ;
             break;
         case LDR_FW_ASYNC_PHASE_FINALIZE:
-            pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+            pipe->last_error = pipe->security.enable_anti_rollback
+                ? LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT
+                : LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
             break;
         case LDR_FW_ASYNC_PHASE_WRITE:
         default:
@@ -829,7 +830,14 @@ static int pipe_async_step_finalize(
     }
 
     (void)memset(&pipe->async_op, 0, sizeof(pipe->async_op));
-    pipe->async_op.kind = ECAT_ASYNC_DATA_OP_FINALIZE;
+    if (pipe->security.enable_anti_rollback) {
+        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_FINALIZE_WITH_FLOOR;
+        pipe->async_op.target_id = pipe->req_target_id;
+        pipe->async_op.fw_version = pipe->meta.fw_version;
+        pipe->async_op.min_allow_version = pipe->meta.min_allow_version;
+    } else {
+        pipe->async_op.kind = ECAT_ASYNC_DATA_OP_FINALIZE;
+    }
     fin_res = aops->start(target->user_ctx, &pipe->async_op);
     if (fin_res == ECAT_ASYNC_OP_PENDING) {
         pipe->async_phase = LDR_FW_ASYNC_PHASE_FINALIZE;
@@ -837,7 +845,9 @@ static int pipe_async_step_finalize(
         return -1;
     }
     if (fin_res != ECAT_ASYNC_OP_COMPLETE) {
-        pipe->last_error = LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
+        pipe->last_error = pipe->security.enable_anti_rollback
+            ? LDR_FW_PIPE_ERR_ANTI_ROLLBACK_COMMIT
+            : LDR_FW_PIPE_ERR_DRIVER_FINALIZE;
         abort_driver_once(pipe);
         *out_res = ECAT_UPGRADE_ASYNC_FAILED;
         return -1;
