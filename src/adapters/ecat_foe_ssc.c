@@ -364,6 +364,11 @@ uint16_t ecat_foe_ssc_on_read(ecat_foe_ssc_adapter_t *adapter,
         adapter->session_active = false;
         return (uint16_t)rc;
     }
+    if (actual > (size_t)maxBlockSize) {
+        ssc_abort_core(adapter);
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_PROGERROR;
+    }
 
     *outLength = (uint16_t)actual;
     adapter->session_active = ecat_foe_transport_owns(&adapter->transport);
@@ -411,6 +416,11 @@ uint16_t ecat_foe_ssc_on_read_data(ecat_foe_ssc_adapter_t *adapter,
     if (rc != 0) {
         adapter->session_active = false;
         return (uint16_t)rc;
+    }
+    if (actual > (size_t)maxBlockSize) {
+        ssc_abort_core(adapter);
+        adapter->session_active = false;
+        return ECAT_FOE_SSC_ERR_PROGERROR;
     }
 
     *outLength = (uint16_t)actual;

@@ -195,7 +195,8 @@ int ecat_foe_transport_resolve_read_target(const ecat_foe_transport_t *t,
         name == NULL || out_target_id == NULL) {
         return ECAT_FOE_ERRCODE_ILLEGAL;
     }
-    if (length == 0U || length > ECAT_FOE_MAX_FILENAME_LEN) {
+    if (length == 0U || length > ECAT_FOE_MAX_FILENAME_LEN ||
+        memchr(name, '\0', length) != NULL) {
         return ECAT_FOE_ERRCODE_ILLEGAL;
     }
 
