@@ -34,11 +34,15 @@ ENABLE_FOE ?= 1
 ENABLE_FOE_CORE ?= 1
 ENABLE_FILE ?= 0
 ENABLE_EFW_PLUGIN ?= 1
+ENABLE_RAW_PLUGIN ?= 1
 FOE_STACK ?= ssc
 UPGRADE_BUILD_DIR ?= build/upgrade
 NEUTRAL_LIBRARY_SOURCES = src/ldr_crc32.c src/ecat_upgrade_session.c src/ecat_target_registry.c src/ecat_transfer.c src/ecat_transport_endpoint.c src/ecat_transport_plugin.c src/ldr_format_plugin.c src/ldr_fw_pipeline.c src/ldr_loader.c
 UPGRADE_LIBRARY_SOURCES = $(NEUTRAL_LIBRARY_SOURCES)
 UPGRADE_EXTRA_CFLAGS =
+ifeq ($(ENABLE_RAW_PLUGIN),1)
+UPGRADE_LIBRARY_SOURCES += src/plugins/ldr_format_raw.c
+endif
 ifeq ($(ENABLE_EFW_PLUGIN),1)
 UPGRADE_LIBRARY_SOURCES += src/ecat_foe_efw.c src/plugins/ldr_format_efw.c
 endif
@@ -266,6 +270,9 @@ test-ldr-trim-matrix:
 	if nm -u "$$TMP_MTX_DIR/lib_neutral_only.a" | grep -E 'ecat_foe_core|port_get_version_floor|ecat_foe_config_abi'; then echo "[FAIL] lib_neutral_only.a 存在残留 FoE 符号依赖"; exit 1; fi && \
 	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -Iexamples/custom_transport_template -o "$$TMP_MTX_DIR/test_uart_template" examples/custom_transport_template/ldr_uart_transport_template.c examples/custom_transport_template/test_uart_transport_template.c "$$TMP_MTX_DIR/lib_neutral_only.a" && \
 	"$$TMP_MTX_DIR/test_uart_template" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/plugins/ldr_format_raw.c -o "$$TMP_MTX_DIR/m1/ldr_format_raw.o" && \
+	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -Iexamples/custom_transport_template -o "$$TMP_MTX_DIR/test_uart_async_fw_example" examples/custom_transport_template/ldr_uart_transport_template.c examples/custom_transport_template/test_uart_async_fw_example.c "$$TMP_MTX_DIR/m1/ldr_format_raw.o" "$$TMP_MTX_DIR/lib_neutral_only.a" && \
+	"$$TMP_MTX_DIR/test_uart_async_fw_example" && \
 	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/ecat_foe_efw.c -o "$$TMP_MTX_DIR/m2/ecat_foe_efw.o" && \
 	$(CC) $(filter-out -Itests/stubs,$(CFLAGS)) -c src/plugins/ldr_format_efw.c -o "$$TMP_MTX_DIR/m2/ldr_format_efw.o" && \
 	$(AR) rcs "$$TMP_MTX_DIR/lib_with_efw.a" "$$TMP_MTX_DIR/m1/"*.o "$$TMP_MTX_DIR/m2/"*.o && \

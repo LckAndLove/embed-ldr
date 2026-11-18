@@ -170,7 +170,7 @@ ldr_format_probe_result_t ldr_format_registry_probe_and_parse(
 
         pres = slot->ops->probe(buf, len, &hdr_size, slot->plugin_ctx);
         if (pres == LDR_FORMAT_MATCH) {
-            if (hdr_size == 0U) {
+            if ((hdr_size == 0U) && (slot->format_id != LDR_FORMAT_ID_RAW)) {
                 return LDR_FORMAT_INVALID;
             }
             if (out_header_size != NULL) {

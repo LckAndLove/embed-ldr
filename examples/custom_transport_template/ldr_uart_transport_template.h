@@ -31,6 +31,7 @@ typedef struct {
     size_t                   tx_buf_cap; /* 导出缓冲容量 (字节) */
     size_t                   pending_read_len;      /* 持久化读长度槽位 (防止异步读栈指针悬空) */
     bool                     export_read_in_flight; /* 异步导出读取挂起标志 */
+    bool                     export_finishing;      /* 异步导出终结关闭挂起标志 */
     uint32_t                 events_started;
     uint32_t                 events_progress;
     uint32_t                 events_completed;

@@ -12,7 +12,7 @@
 | **双向传输核心** | `include/ecat_transfer.h`, `src/ecat_transfer.c`, `include/ldr_crc32.h` | 双向 `IMPORT` / `EXPORT` 状态机、单租约互斥仲裁、可选固件后端虚表 `ldr_fw_backend_ops_t`（链接级零 FoE/EFW 依赖） |
 | **插件层 1：目标存储插件** | `include/ecat_target_registry.h`, `src/ecat_target_registry.c` | 注册任意数量固件区/数据区（ID `1..65535`）与细粒度 `(transport_id, target_id)` ACL 权限矩阵 |
 | **插件层 2：传输通道插件** | `include/ecat_transport_plugin.h`, `src/ecat_transport_plugin.c`, `include/ecat_transport_endpoint.h` | 统一通道能力声明（`IMPORT` / `EXPORT` / `ASYNC`）、注册与主循环轮询；内置可选 FoE（WRQ + RRQ）、File 流，支持自定义 UART/CAN/USB/BLE 通道 |
-| **插件层 3：格式与固件刷写流水线** | `include/ldr_format_plugin.h`, `include/ldr_fw_pipeline.h`, `src/ldr_fw_pipeline.c`, `src/plugins/ldr_format_efw.c` | 通过 `ldr_format_registry_t` 自动探测并校验 EFW 或自定义镜像格式，由 `ldr_fw_pipeline_t` 驱动防变砖刷写（支持同步与基于 `ldr_loader_poll()` 的非阻塞异步状态机，内置流式验签接口 `ldr_signature_verifier_t`、防回滚版本下限原子事务提交与流/回读双 CRC 核验） |
+| **插件层 3：格式与固件刷写流水线** | `include/ldr_format_plugin.h`, `include/ldr_fw_pipeline.h`, `src/ldr_fw_pipeline.c`, `src/plugins/ldr_format_efw.c`, `src/plugins/ldr_format_raw.c` | 通过 `ldr_format_registry_t` 自动探测并校验 EFW v2、原始 `.bin` (`RAW`) 或自定义镜像格式，由 `ldr_fw_pipeline_t` 驱动防变砖刷写（同步与基于 `ldr_loader_poll()` 的非阻塞异步状态机均支持流式验签、防回滚版本下限原子事务提交与流/回读双 CRC 核验） |
 
 ## 2. 双向能力矩阵
 

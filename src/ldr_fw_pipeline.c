@@ -215,9 +215,18 @@ static int pipe_consume_header_chunk(
         return -1;
     }
 
-    if ((parsed_meta.header_size == 0U) ||
-        ((size_t)parsed_meta.header_size > pipe->header_rx_len) ||
-        ((size_t)parsed_meta.header_size < prev_hdr_len)) {
+    if ((parsed_meta.header_size == 0U) && (parsed_meta.format_id == LDR_FORMAT_ID_RAW)) {
+        if (prev_hdr_len != 0U) {
+            pipe->last_error = LDR_FW_PIPE_ERR_FORMAT_REJECTED;
+            if (out_err != NULL) {
+                *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
+            }
+            return -1;
+        }
+        pipe->header_rx_len = 0U;
+    } else if ((parsed_meta.header_size == 0U) ||
+               ((size_t)parsed_meta.header_size > pipe->header_rx_len) ||
+               ((size_t)parsed_meta.header_size < prev_hdr_len)) {
         pipe->last_error = LDR_FW_PIPE_ERR_FORMAT_REJECTED;
         if (out_err != NULL) {
             *out_err = ECAT_TRANSFER_ERR_CORE_UPGRADE;
@@ -257,9 +266,11 @@ static int pipe_consume_header_chunk(
     }
 
     pipe->meta = parsed_meta;
-    size_t consumed = (size_t)parsed_meta.header_size - prev_hdr_len;
-    *io_cursor += consumed;
-    *io_remaining -= consumed;
+    if (parsed_meta.header_size > 0U) {
+        size_t consumed = (size_t)parsed_meta.header_size - prev_hdr_len;
+        *io_cursor += consumed;
+        *io_remaining -= consumed;
+    }
     return 1;
 }
 

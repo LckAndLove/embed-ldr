@@ -150,6 +150,7 @@ ldr_transfer_result_t ldr_uart_transport_on_export_begin(
     }
     uart->pending_read_len = 0U;
     uart->export_read_in_flight = false;
+    uart->export_finishing = false;
     return ldr_transport_endpoint_begin_export(&uart->endpoint, target_id, out_total_size);
 }
 
@@ -160,6 +161,14 @@ ldr_transfer_result_t ldr_uart_transport_pump_export_frame(
 
     if ((uart == NULL) || (uart->tx_fn == NULL) || (uart->tx_buf == NULL)) {
         return LDR_RES_INVALID;
+    }
+
+    if (uart->export_finishing) {
+        res = ldr_transport_endpoint_poll(&uart->endpoint);
+        if (res != LDR_RES_PENDING) {
+            uart->export_finishing = false;
+        }
+        return res;
     }
 
     if (uart->export_read_in_flight) {
@@ -191,7 +200,11 @@ ldr_transfer_result_t ldr_uart_transport_pump_export_frame(
     }
 
     if (res == LDR_RES_COMPLETE) {
-        return ldr_transport_endpoint_finish_export(&uart->endpoint);
+        res = ldr_transport_endpoint_finish_export(&uart->endpoint);
+        if (res == LDR_RES_PENDING) {
+            uart->export_finishing = true;
+        }
+        return res;
     }
     return LDR_RES_CONTINUE;
 }
@@ -203,5 +216,6 @@ void ldr_uart_transport_abort(ldr_uart_transport_t *uart)
     }
     uart->pending_read_len = 0U;
     uart->export_read_in_flight = false;
+    uart->export_finishing = false;
     ldr_transport_endpoint_abort(&uart->endpoint);
 }

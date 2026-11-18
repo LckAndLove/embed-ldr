@@ -35,15 +35,21 @@ extern "C" {
 #include "ecat_target_registry_abi.h"
 
 void ECAT_TARGET_REGISTRY_ABI_SYMBOL(void);
+#ifndef ECAT_DISABLE_ABI_CHECK
 #if defined(__has_attribute)
 #if __has_attribute(used) && __has_attribute(retain)
 __attribute__((used, retain)) static void (*const ecat_target_registry_abi_reference)(void) = ECAT_TARGET_REGISTRY_ABI_SYMBOL;
+#elif __has_attribute(used)
+__attribute__((used)) static void (*const ecat_target_registry_abi_reference)(void) = ECAT_TARGET_REGISTRY_ABI_SYMBOL;
 #else
-#error "Target registry ABI checking requires compiler support for used and retain attributes"
+#error "Target registry ABI checking requires compiler support for used/retain attributes (define ECAT_DISABLE_ABI_CHECK to opt out)"
 #endif
+#elif defined(__IAR_SYSTEMS_ICC__)
+__root static void (*const ecat_target_registry_abi_reference)(void) = ECAT_TARGET_REGISTRY_ABI_SYMBOL;
 #else
-#error "Target registry ABI checking requires compiler support for used and retain attributes"
+#error "Target registry ABI checking requires compiler support for used/retain attributes (define ECAT_DISABLE_ABI_CHECK to opt out)"
 #endif
+#endif /* ECAT_DISABLE_ABI_CHECK */
 
 #define ECAT_TARGET_NAME_MAX_LEN 16U
 
