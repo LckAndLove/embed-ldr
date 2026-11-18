@@ -38,7 +38,7 @@ int ecat_transport_registry_register(
     if ((reg == NULL) || (desc == NULL)) {
         return -1;
     }
-    if (!is_valid_plugin_name(desc->name)) {
+    if ((desc->transport_id == 0U) || !is_valid_plugin_name(desc->name)) {
         return -1;
     }
     if ((desc->ops == NULL) || (desc->ops->is_active == NULL) || (desc->plugin_ctx == NULL)) {
@@ -46,6 +46,10 @@ int ecat_transport_registry_register(
     }
     if (((desc->capabilities & ECAT_TRANSPORT_CAP_BIDIRECTIONAL) == 0UL) ||
         ((desc->capabilities & ~ECAT_TRANSPORT_CAP_ALL_MASK) != 0UL)) {
+        return -1;
+    }
+    if (((desc->capabilities & ECAT_TRANSPORT_CAP_ASYNC) != 0UL) &&
+        (desc->ops->poll == NULL)) {
         return -1;
     }
     if (reg->count >= (uint8_t)ECAT_TRANSPORT_REGISTRY_MAX_PLUGINS) {

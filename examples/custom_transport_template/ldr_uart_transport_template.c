@@ -148,27 +148,43 @@ ldr_transfer_result_t ldr_uart_transport_on_export_begin(
     if (uart == NULL) {
         return LDR_RES_INVALID;
     }
+    uart->pending_read_len = 0U;
+    uart->export_read_in_flight = false;
     return ldr_transport_endpoint_begin_export(&uart->endpoint, target_id, out_total_size);
 }
 
 ldr_transfer_result_t ldr_uart_transport_pump_export_frame(
     ldr_uart_transport_t *uart)
 {
-    size_t actual_read = 0U;
     ldr_transfer_result_t res;
 
     if ((uart == NULL) || (uart->tx_fn == NULL) || (uart->tx_buf == NULL)) {
         return LDR_RES_INVALID;
     }
 
-    res = ldr_transport_endpoint_read_chunk(
-        &uart->endpoint, uart->tx_buf, uart->tx_buf_cap, &actual_read);
+    if (uart->export_read_in_flight) {
+        res = ldr_transport_endpoint_poll(&uart->endpoint);
+    } else {
+        uart->pending_read_len = 0U;
+        res = ldr_transport_endpoint_read_chunk(
+            &uart->endpoint, uart->tx_buf, uart->tx_buf_cap, &uart->pending_read_len);
+    }
+
+    if (res == LDR_RES_PENDING) {
+        uart->export_read_in_flight = true;
+        return LDR_RES_PENDING;
+    }
+    uart->export_read_in_flight = false;
+
     if ((res != LDR_RES_CONTINUE) && (res != LDR_RES_COMPLETE)) {
+        uart->pending_read_len = 0U;
         return res;
     }
 
-    if (actual_read > 0U) {
-        if (uart->tx_fn(uart->tx_buf, actual_read, uart->hal_ctx) != 0) {
+    if (uart->pending_read_len > 0U) {
+        size_t tx_len = uart->pending_read_len;
+        uart->pending_read_len = 0U;
+        if (uart->tx_fn(uart->tx_buf, tx_len, uart->hal_ctx) != 0) {
             ldr_transport_endpoint_abort(&uart->endpoint);
             return LDR_RES_FAILED;
         }
@@ -185,5 +201,7 @@ void ldr_uart_transport_abort(ldr_uart_transport_t *uart)
     if (uart == NULL) {
         return;
     }
+    uart->pending_read_len = 0U;
+    uart->export_read_in_flight = false;
     ldr_transport_endpoint_abort(&uart->endpoint);
 }

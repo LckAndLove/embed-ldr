@@ -75,6 +75,7 @@ typedef enum {
     ECAT_ASYNC_DATA_OP_FINALIZE,
     ECAT_ASYNC_DATA_OP_READ_OPEN,
     ECAT_ASYNC_DATA_OP_READ_CLOSE,
+    /* 防回滚原子事务提交: 必须同时提交镜像激活与单调不减版本下限，具备断电可恢复语义 */
     ECAT_ASYNC_DATA_OP_FINALIZE_WITH_FLOOR
 } ecat_async_data_op_kind_t;
 

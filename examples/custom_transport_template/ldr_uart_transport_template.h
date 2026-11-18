@@ -29,6 +29,8 @@ typedef struct {
     void                    *hal_ctx;    /* 硬件外设上下文 */
     uint8_t                 *tx_buf;     /* 调用方静态提供的单帧导出缓冲 */
     size_t                   tx_buf_cap; /* 导出缓冲容量 (字节) */
+    size_t                   pending_read_len;      /* 持久化读长度槽位 (防止异步读栈指针悬空) */
+    bool                     export_read_in_flight; /* 异步导出读取挂起标志 */
     uint32_t                 events_started;
     uint32_t                 events_progress;
     uint32_t                 events_completed;

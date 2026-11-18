@@ -268,6 +268,14 @@ static void test_registry_validation_and_capacity(void)
     bad_desc.capabilities = ECAT_TRANSPORT_CAP_IMPORT | (1UL << 31U); /* 未知能力位 */
     assert(ecat_transport_registry_register(&reg, &bad_desc) == -1);
 
+    bad_desc.capabilities = ECAT_TRANSPORT_CAP_BIDIRECTIONAL | ECAT_TRANSPORT_CAP_ASYNC; /* 声明异步但缺少 poll */
+    assert(ecat_transport_registry_register(&reg, &bad_desc) == -1);
+
+    bad_desc.transport_id = 0U; /* 0 号保留为通配符，禁止注册 */
+    bad_desc.capabilities = ECAT_TRANSPORT_CAP_BIDIRECTIONAL;
+    assert(ecat_transport_registry_register(&reg, &bad_desc) == -1);
+    bad_desc.transport_id = 10U;
+
     bad_desc.capabilities = ECAT_TRANSPORT_CAP_BIDIRECTIONAL;
     bad_desc.name = "THIS_NAME_IS_TOO_LONG_FOR_SLOT";
     assert(ecat_transport_registry_register(&reg, &bad_desc) == -1);
