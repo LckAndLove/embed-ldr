@@ -135,7 +135,7 @@ int ldr_loader_init(ldr_loader_t *loader);
 /**
  * @brief 向统一 Loader 框架绑定可选固件升级后端虚表
  * @param loader 框架实例指针
- * @param fw_core 固件核心上下文指针
+ * @param fw_ctx 固件后端上下文指针 (如 ldr_fw_pipeline_t 或兼容 ecat_foe_core_t)
  * @param ops 固件后端操作虚表
  * @param shared_session 可选共享会话仲裁器指针 (NULL 时使用内置会话)
  * @return 0 成功，-1 参数非法或绑定冲突

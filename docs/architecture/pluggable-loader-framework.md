@@ -31,7 +31,8 @@
 
 | 配置场景 | 裁剪参数 | 说明 |
 | :--- | :--- | :--- |
-| 纯中性无 FoE/EFW/文件流 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=0` | 仅含 9 个纯中性核心源文件（`nm -u` 零 FoE 符号依赖），对接自定义总线与格式 |
+| 纯中性无 FoE/EFW/RAW/文件流 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=0 ENABLE_RAW_PLUGIN=0` | 仅含 9 个纯中性核心源文件（`nm -u` 零 FoE 符号依赖），对接自定义总线与格式 |
+| 中性核心 + RAW 格式插件 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=0 ENABLE_RAW_PLUGIN=1` | 无 EtherCAT/EFW 依赖，支持原始 `.bin` 异步/同步固件刷写 |
 | 中性核心 + EFW 格式插件 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=0 ENABLE_EFW_PLUGIN=1` | 无 EtherCAT 协议栈，复用 EFW v2 容器头校验 |
 | 中性核心 + 宿主文件流 | `ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_FILE=1 ENABLE_EFW_PLUGIN=0` | 用于桌面工具、回放测试或本地存储双向导入导出 |
 | 完整栈（FoE SSC + 文件流） | `ENABLE_FOE=1 ENABLE_FOE_CORE=1 FOE_STACK=ssc ENABLE_FILE=1` | 同时启用 EtherCAT FoE 双向升级/导出与文件流插件 |

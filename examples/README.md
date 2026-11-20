@@ -1,19 +1,23 @@
-# EtherCAT FoE 核心状态机参考示例与驱动模板 (Examples & Templates)
+# embed-ldr 参考示例与模板 (Examples & Templates)
 
-本目录包含 EtherCAT FoE 固件升级核心状态机的宿主机参考示例（Host Demo）与底层驱动实现模板（Driver Template）。
+本目录包含 `embed-ldr` 统一可扩展双向 Loader 框架及可选 EtherCAT FoE 后端的参考示例、自定义总线模板与驱动模板。
 
 ## 1. 目录结构
 
 ```text
 examples/
-├── README.md                      # 本说明文档
-├── FINDINGS.md                    # 示例开发技术发现与 API 完备性评估
-├── host_demo/                     # 宿主机参考运行示例
-│   ├── main.c                     # 8 大场景测试入口与文件 Flash 模拟驱动
-│   └── expected_output.txt        # 宿主示例基准参考输出 (用于自动化对比回归)
-└── driver_template/               # 底层物理介质驱动模板
-    ├── ecat_foe_driver_template.h # 目标驱动回调契约头文件
-    └── ecat_foe_driver_template.c # 驱动骨架实现
+├── README.md                       # 本说明文档
+├── FINDINGS.md                     # 示例开发技术发现与 API 完备性评估
+├── custom_transport_template/      # 纯中性自定义总线双向模板与异步固件刷写示例 (零 FoE/EFW 依赖)
+│   ├── ldr_uart_transport_template.{h,c} # 自定义 UART/RS-485 双向通道插件模板
+│   ├── test_uart_transport_template.c    # 纯中性双向 DATA 导入/导出示例
+│   └── test_uart_async_fw_example.c      # 纯中性异步固件刷写 (RAW .bin + 验签 + 防回滚 + 异步 EXPORT)
+├── host_demo/                      # 宿主机 EFW/FoE 核心参考运行示例 (8 大场景)
+├── driver_template/                # 底层物理介质同步驱动模板
+├── file_stream/                    # 宿主 FILE 流双向导入/导出参考说明
+├── crypto/                         # 可选 Monocypher Ed25519ph 设备端验签适配器
+├── ssc_async/                      # Beckhoff SSC 异步固件升级参考
+└── bootloader_soes/                # SOES Bootloader 集成参考
 ```
 
 ## 2. 宿主机参考示例 (host_demo)
@@ -48,7 +52,7 @@ make test-sentinels
 ```bash
 TMP_DIR=$(mktemp -d /tmp/foe_demo_build_XXXXXX)
 clang -Wall -Wextra -Werror -std=c99 -pedantic -Iinclude -o "$TMP_DIR/host_demo" \
-  examples/host_demo/main.c src/ecat_foe_efw.c src/ecat_foe_core.c \
+  examples/host_demo/main.c src/ldr_crc32.c src/ecat_foe_efw.c src/ecat_foe_core.c \
   src/ecat_foe_core_async.c src/ecat_foe_target_async.c src/ecat_target_registry.c \
   src/ecat_upgrade_session.c src/ecat_transfer.c src/adapters/ecat_foe_transport.c
 "$TMP_DIR/host_demo"

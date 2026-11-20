@@ -155,7 +155,41 @@ typedef struct {
 /* -------------------------------------------------------------------------- */
 
 /**
- * @brief 初始化双向传输管理器
+ * @brief 初始化纯中性双向传输管理器 (零 FoE / 零 EFW 链接依赖)
+ * @param t 管理器上下文指针
+ * @param reg 目标注册表指针 (必须非空)
+ * @return 0 成功，-1 参数非法
+ */
+int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg);
+
+/**
+ * @brief 向已初始化的传输管理器绑定可选固件升级后端虚表
+ * @param t 管理器上下文指针
+ * @param fw_ctx 固件后端上下文指针 (如 ldr_fw_pipeline_t 或兼容 ecat_foe_core_t)
+ * @param ops 固件后端操作虚表
+ * @param shared_session 可选共享会话仲裁器指针 (NULL 时使用管理器内置会话)
+ * @return 0 成功，-1 参数非法或绑定冲突
+ */
+int ecat_transfer_bind_fw_backend(
+    ecat_transfer_t *t,
+    void *fw_ctx,
+    const ldr_fw_backend_ops_t *ops,
+    ecat_upgrade_session_t *shared_session);
+
+/**
+ * @brief 向传输管理器绑定可选的异步固件操作虚表 (供中性异步固件流水线使用)
+ * @param t 管理器上下文指针
+ * @param ops 异步固件操作虚表
+ * @param async_ctx 异步固件操作上下文
+ * @return 0 成功，-1 参数非法或当前有活跃会话
+ */
+int ecat_transfer_bind_fw_async_ops(
+    ecat_transfer_t *t,
+    const ecat_upgrade_async_ops_t *ops,
+    void *async_ctx);
+
+/**
+ * @brief 兼容入口：初始化双向传输管理器并可选绑定旧版 FoE 固件升级核心
  *
  * 【多管理器共享与生命周期契约】：
  * - 若 core != NULL，首个初始化的管理器将向 core 绑定权威注册表与会话仲裁器 (core->shared_session)；
@@ -172,37 +206,6 @@ typedef struct {
  * @param core 可选固件升级核心状态机 (若不执行固件安全升级可传入 NULL)
  * @return 0 成功，-1 参数非法或尝试冲突绑定
  */
-/**
- * @brief 初始化纯中性双向传输管理器 (零 FoE / 零 EFW 链接依赖)
- * @param t 管理器上下文指针
- * @param reg 目标注册表指针 (必须非空)
- * @return 0 成功，-1 参数非法
- */
-int ecat_transfer_init_neutral(ecat_transfer_t *t, ecat_target_registry_t *reg);
-
-/**
- * @brief 向已初始化的传输管理器绑定可选固件升级后端虚表
- * @param t 管理器上下文指针
- * @param core 固件核心上下文指针
- * @param ops 固件后端操作虚表
- * @param shared_session 可选共享会话仲裁器指针 (NULL 时使用管理器内置会话)
- * @return 0 成功，-1 参数非法或绑定冲突
- */
-int ecat_transfer_bind_fw_backend(
-    ecat_transfer_t *t,
-    void *fw_ctx,
-    const ldr_fw_backend_ops_t *ops,
-    ecat_upgrade_session_t *shared_session);
-
-/**
- * @brief 向传输管理器绑定可选的异步固件操作虚表 (供中性异步固件流水线使用)
- * @return 0 成功，-1 参数非法或当前有活跃会话
- */
-int ecat_transfer_bind_fw_async_ops(
-    ecat_transfer_t *t,
-    const ecat_upgrade_async_ops_t *ops,
-    void *async_ctx);
-
 int ecat_transfer_init(ecat_transfer_t *t, ecat_target_registry_t *reg, struct ecat_foe_core *core);
 
 /**
