@@ -1,9 +1,9 @@
-# ECAT
+# embed-ldr
 
-<p align="center"><strong>嵌入式传输与固件升级框架 · C99 · 面向 32 位 MCU</strong></p>
+<p align="center"><strong>统一可扩展嵌入式双向 Loader 与固件升级框架 · C99 · 零 malloc · 面向 32 位 MCU</strong></p>
 
 <p align="center">
-  <a href="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
+  <a href="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
   <img src="https://img.shields.io/badge/language-C99-blue" alt="C99">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
@@ -70,7 +70,7 @@ flowchart TD
 
 ### Windows
 
-项目提供 Windows x64 独立 CLI。可在 [GitHub Actions](https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml) 下载工作流产物；通过测试的 `v0.1.0-alpha.N` 等测试版标签会生成 [预发布 Release](https://github.com/lckandyou-cmyk/ecat/releases)。目标电脑无需安装 Python。
+项目提供 Windows x64 独立 CLI。可在 [GitHub Actions](https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml) 下载工作流产物；通过测试的 `v0.1.0-alpha.N` 等测试版标签会生成 [预发布 Release](https://github.com/lckandyou-cmyk/embed-ldr/releases)。目标电脑无需安装 Python。
 
 解压后在 PowerShell 中运行：
 
@@ -101,15 +101,18 @@ cc -Iinclude -I/path/to/config '-DECAT_FOE_CONFIG_HEADER="ecat_foe_conf.h"' -c s
 
 ## 可选升级入口
 
-`ecat_transfer_t` 提供统一的会话、导入、导出和异步轮询接口。FoE 默认启用，SOES/SSC 必须绑定该管理器；可选宿主文件流入口默认关闭。不同入口不能抢占或取消其他所有者的会话，固件导入共用 EFW 校验、验签与存储驱动。
+框架通过顶层中性门面 `ldr_loader_t` 统一纳管传输端点、目标注册表与格式驱动刷写流水线 `ldr_fw_pipeline_t`（同步与异步均支持流式验签、防回滚版本下限原子提交与双 CRC 核验），并内置提供 `EFW` 与 `RAW`（原始 `.bin`）镜像格式插件。
+
+`ecat_transfer_t` 提供底层的统一会话、导入、导出和异步轮询接口。FoE 默认启用，SOES/SSC 必须绑定该管理器；可选宿主文件流入口默认关闭。不同入口不能抢占或取消其他所有者的会话，固件导入共用格式校验、验签与存储驱动。
 
 ```sh
 make build-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
+make build-upgrade ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_EFW_PLUGIN=0 ENABLE_RAW_PLUGIN=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/neutral-only
 ```
 
-默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。文件流是架构参考，UART/CAN/USB/网络协议尚未实现。接口、构建矩阵及接入顺序见[统一传输架构](docs/architecture/unified-transfer-architecture.md)和[文件流接入](examples/file_stream/README.md)。目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)与[可注册固件目标设计](docs/architecture/custom-firmware-targets.md)。固件与数据目标统一由 `ecat_target_registry_t` 管理，支持 `1..65535` 非零目标 ID（`1..4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 规范名为 `T0005`～`TFFFF`），注册槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制；ACL 和签名验证须按设备配置启用。
+默认静态库选择 SSC 适配器；SOES 需显式选择并提供协议栈/BSP 头。以上构建仍要求 POSIX Make 工具链。宿主文件流已支持同步/异步双向导入与导出，自定义总线（UART/CAN/USB/BLE 等）可通过 `ldr_transport_endpoint_t` 快速接入，参考 `examples/custom_transport_template/` 中的 UART 双向模板与异步固件刷写示例。接口、构建矩阵及接入顺序见[统一传输架构](docs/architecture/unified-transfer-architecture.md)和[文件流接入](examples/file_stream/README.md)。目标注册、可选通道与双向导入/导出接口见[多通道与目标区块指南](docs/multichannel-bidirectional-framework.md)与[可注册固件目标设计](docs/architecture/custom-firmware-targets.md)。固件与数据目标统一由 `ecat_target_registry_t` 管理，支持 `1..65535` 非零目标 ID（`1..4` 规范名为 `MCU`/`FPGA`/`SII`/`EEPROM`，`5..65535` 规范名为 `T0005`～`TFFFF`），注册槽位数受 `ECAT_TARGET_REGISTRY_MAX_BLOCKS` 限制；ACL 和签名验证须按设备配置启用。
 
 此次架构收敛已移除旧升级管理器、兼容入口与双套四元目标数组，使用旧接口的工程须迁移至 `ecat_transfer_t` + `ecat_target_registry_t` 并全量重新编译。固件核心的内部事件不再作为应用传输入口。
 
@@ -136,7 +139,8 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-onl
 
 ## 规范与反馈
 
-- [ECAT Wiki：快速开始、架构、移植与故障排查](https://github.com/lckandyou-cmyk/ecat/wiki)
+- [统一可扩展双向 Loader 架构与插件接入指南](docs/architecture/pluggable-loader-framework.md)
+- [embed-ldr Wiki：快速开始、架构、移植与故障排查](https://github.com/lckandyou-cmyk/embed-ldr/wiki)
 - [EFW v2 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
 - [多通道双向传输与目标区块指南](docs/multichannel-bidirectional-framework.md)
 - [统一传输架构说明](docs/architecture/unified-transfer-architecture.md)

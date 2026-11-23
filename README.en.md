@@ -1,9 +1,9 @@
-# ECAT
+# embed-ldr
 
-<p align="center"><strong>Embedded transfer and firmware upgrade framework · C99 · 32-bit MCUs</strong></p>
+<p align="center"><strong>Unified extensible embedded bidirectional loader & firmware upgrade framework · C99 · Zero malloc · For 32-bit MCUs</strong></p>
 
 <p align="center">
-  <a href="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
+  <a href="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
   <img src="https://img.shields.io/badge/language-C99-blue" alt="C99">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
@@ -70,7 +70,7 @@ Without a public key, `info` reports a signature as present but unverified. The 
 
 ### Windows
 
-The project builds a standalone Windows x64 CLI. Download the workflow artifact from [GitHub Actions](https://github.com/lckandyou-cmyk/ecat/actions/workflows/windows-cli.yml); tested prerelease tags such as `v0.1.0-alpha.N` publish a [prerelease](https://github.com/lckandyou-cmyk/ecat/releases). Python is not required on the target computer.
+The project builds a standalone Windows x64 CLI. Download the workflow artifact from [GitHub Actions](https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml); tested prerelease tags such as `v0.1.0-alpha.N` publish a [prerelease](https://github.com/lckandyou-cmyk/embed-ldr/releases). Python is not required on the target computer.
 
 After extracting the archive, run this in PowerShell:
 
@@ -101,15 +101,18 @@ This release consolidates all firmware and data targets onto a single `ecat_targ
 
 ## Optional upgrade transports
 
-`ecat_transfer_t` manages sessions, import, export and asynchronous polling. FoE is enabled by default; SOES/SSC must bind to the manager. The optional host FILE stream reference is disabled by default. Owners cannot steal or cancel each other's sessions; firmware imports share EFW validation, signature verification and storage drivers.
+The framework coordinates transport endpoints, the target registry, and the format-driven firmware flashing pipeline `ldr_fw_pipeline_t` via the top-level neutral facade `ldr_loader_t` (supporting streaming signature verification, anti-rollback version floor atomic commit, and dual CRC validation in both synchronous and asynchronous modes), with built-in `EFW` and `RAW` (raw `.bin`) format plugins.
+
+`ecat_transfer_t` provides the underlying unified sessions, import, export, and asynchronous polling. FoE is enabled by default; SOES/SSC must bind to the manager. The optional host FILE stream reference is disabled by default. Owners cannot steal or cancel each other's sessions; firmware imports share format validation, signature verification, and storage drivers.
 
 ```sh
 make build-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=1 UPGRADE_BUILD_DIR=build/file-upgrade
 make build-upgrade ENABLE_FOE=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/custom-only
+make build-upgrade ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_EFW_PLUGIN=0 ENABLE_RAW_PLUGIN=0 ENABLE_FILE=0 UPGRADE_BUILD_DIR=build/neutral-only
 ```
 
-The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. The file stream is a host-side import reference; UART/CAN/USB/network protocols are not implemented. See the [unified transfer architecture](docs/architecture/unified-transfer-architecture.md), [file stream integration](examples/file_stream/README.md), [multichannel guide](docs/multichannel-bidirectional-framework.md), and [custom firmware targets](docs/architecture/custom-firmware-targets.md) for synchronous and asynchronous import/export and custom endpoints. Both firmware and data targets are configured in a single `ecat_target_registry_t` supporting nonzero target IDs `1..65535` (`MCU`/`FPGA`/`SII`/`EEPROM` for `1..4` and `T0005`–`TFFFF` for `5..65535`), bounded statically by `ECAT_TARGET_REGISTRY_MAX_BLOCKS`. ACL enforcement and signature verification require explicit local configuration.
+The default static library selects the SSC adapter. SOES requires explicit selection and stack/BSP headers. This build still requires the existing POSIX Make toolchain. Host file streaming supports synchronous/asynchronous bidirectional import and export; custom buses (UART/CAN/USB/BLE, etc.) can be integrated rapidly via `ldr_transport_endpoint_t`—see the UART bidirectional template and asynchronous firmware flashing example in `examples/custom_transport_template/`. See the [unified transfer architecture](docs/architecture/unified-transfer-architecture.md), [file stream integration](examples/file_stream/README.md), [multichannel guide](docs/multichannel-bidirectional-framework.md), and [custom firmware targets](docs/architecture/custom-firmware-targets.md) for synchronous and asynchronous import/export and custom endpoints. Both firmware and data targets are configured in a single `ecat_target_registry_t` supporting nonzero target IDs `1..65535` (`MCU`/`FPGA`/`SII`/`EEPROM` for `1..4` and `T0005`–`TFFFF` for `5..65535`), bounded statically by `ECAT_TARGET_REGISTRY_MAX_BLOCKS`. ACL enforcement and signature verification require explicit local configuration.
 
 The old upgrade manager, compatibility entry points, and duplicate four-slot core target array have been removed. Existing integrations must migrate to `ecat_transfer_t` + `ecat_target_registry_t` and rebuild all translation units; internal core session events are no longer application transport entry points.
 
@@ -136,7 +139,8 @@ Passing host tests does not establish hardware or commercial protocol-stack vali
 
 ## Documentation and feedback
 
-- [ECAT Wiki: getting started, architecture, porting, and troubleshooting](https://github.com/lckandyou-cmyk/ecat/wiki)
+- [Pluggable loader framework architecture and plugin guide](docs/architecture/pluggable-loader-framework.md)
+- [embed-ldr Wiki: getting started, architecture, porting, and troubleshooting](https://github.com/lckandyou-cmyk/embed-ldr/wiki)
 - [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
 - [Multichannel bidirectional transfer and target registry guide](docs/multichannel-bidirectional-framework.md)
 - [Unified transfer architecture](docs/architecture/unified-transfer-architecture.md)
