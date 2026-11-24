@@ -3,7 +3,7 @@
 <p align="center"><strong>统一可扩展嵌入式双向 Loader 与固件升级框架 · C99 · 零 malloc · 面向 32 位 MCU</strong></p>
 
 <p align="center">
-  <a href="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
+  <a href="https://github.com/LckAndLove/embed-ldr/actions/workflows/windows-cli.yml"><img src="https://github.com/LckAndLove/embed-ldr/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
   <img src="https://img.shields.io/badge/language-C99-blue" alt="C99">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
@@ -70,7 +70,7 @@ flowchart TD
 
 ### Windows
 
-项目提供 Windows x64 独立 CLI。可在 [GitHub Actions](https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml) 下载工作流产物；通过测试的 `v0.1.0-alpha.N` 等测试版标签会生成 [预发布 Release](https://github.com/lckandyou-cmyk/embed-ldr/releases)。目标电脑无需安装 Python。
+项目提供 Windows x64 独立 CLI。可在 [GitHub Actions](https://github.com/LckAndLove/embed-ldr/actions/workflows/windows-cli.yml) 下载工作流产物；通过测试的 `v0.1.0-alpha.N` 等测试版标签会生成 [预发布 Release](https://github.com/LckAndLove/embed-ldr/releases)。目标电脑无需安装 Python。
 
 解压后在 PowerShell 中运行：
 
@@ -140,7 +140,7 @@ make build-upgrade ENABLE_FOE=0 ENABLE_FOE_CORE=0 ENABLE_EFW_PLUGIN=0 ENABLE_RAW
 ## 规范与反馈
 
 - [统一可扩展双向 Loader 架构与插件接入指南](docs/architecture/pluggable-loader-framework.md)
-- [embed-ldr Wiki：快速开始、架构、移植与故障排查](https://github.com/lckandyou-cmyk/embed-ldr/wiki)
+- [embed-ldr Wiki：快速开始、架构、移植与故障排查](https://github.com/LckAndLove/embed-ldr/wiki)
 - [EFW v2 固件包格式与签名规范](docs/spec/efw-format-v0.2.md)
 - [多通道双向传输与目标区块指南](docs/multichannel-bidirectional-framework.md)
 - [统一传输架构说明](docs/architecture/unified-transfer-architecture.md)

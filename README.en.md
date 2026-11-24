@@ -3,7 +3,7 @@
 <p align="center"><strong>Unified extensible embedded bidirectional loader & firmware upgrade framework · C99 · Zero malloc · For 32-bit MCUs</strong></p>
 
 <p align="center">
-  <a href="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml"><img src="https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
+  <a href="https://github.com/LckAndLove/embed-ldr/actions/workflows/windows-cli.yml"><img src="https://github.com/LckAndLove/embed-ldr/actions/workflows/windows-cli.yml/badge.svg?branch=main" alt="Windows CLI workflow"></a>
   <img src="https://img.shields.io/badge/language-C99-blue" alt="C99">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License"></a>
 </p>
@@ -70,7 +70,7 @@ Without a public key, `info` reports a signature as present but unverified. The 
 
 ### Windows
 
-The project builds a standalone Windows x64 CLI. Download the workflow artifact from [GitHub Actions](https://github.com/lckandyou-cmyk/embed-ldr/actions/workflows/windows-cli.yml); tested prerelease tags such as `v0.1.0-alpha.N` publish a [prerelease](https://github.com/lckandyou-cmyk/embed-ldr/releases). Python is not required on the target computer.
+The project builds a standalone Windows x64 CLI. Download the workflow artifact from [GitHub Actions](https://github.com/LckAndLove/embed-ldr/actions/workflows/windows-cli.yml); tested prerelease tags such as `v0.1.0-alpha.N` publish a [prerelease](https://github.com/LckAndLove/embed-ldr/releases). Python is not required on the target computer.
 
 After extracting the archive, run this in PowerShell:
 
@@ -140,7 +140,7 @@ Passing host tests does not establish hardware or commercial protocol-stack vali
 ## Documentation and feedback
 
 - [Pluggable loader framework architecture and plugin guide](docs/architecture/pluggable-loader-framework.md)
-- [embed-ldr Wiki: getting started, architecture, porting, and troubleshooting](https://github.com/lckandyou-cmyk/embed-ldr/wiki)
+- [embed-ldr Wiki: getting started, architecture, porting, and troubleshooting](https://github.com/LckAndLove/embed-ldr/wiki)
 - [EFW v2 package and signature format](docs/spec/efw-format-v0.2.md)
 - [Multichannel bidirectional transfer and target registry guide](docs/multichannel-bidirectional-framework.md)
 - [Unified transfer architecture](docs/architecture/unified-transfer-architecture.md)
